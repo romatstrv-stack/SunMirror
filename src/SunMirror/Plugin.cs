@@ -261,7 +261,7 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[_selfTestKey.Value].wasPressedThisFrame) SelfRagdollTest();
         if (kb[_thirdPersonKey.Value].wasPressedThisFrame) ToggleThirdPerson();
         if (kb[_giveKey.Value].wasPressedThisFrame) GiveBinoculars();
-        if (kb[Key.N].wasPressedThisFrame) { ScanShinyMaterials(); DumpMouths(); _emotesLogged = false; LogEmotesOnce(); }
+        if (kb[Key.N].wasPressedThisFrame) { ScanShinyMaterials(); DumpMouths(); _emotesLogged = false; LogEmotesOnce(); ProbeNetwork(); }
         // (LogGuidebookOnce убран: он сканировал сцену КАЖДЫЙ кадр и никогда не находил
         //  руководство после перехода на тарелочку — это и были лаги.)
         if (kb[Key.U].wasPressedThisFrame) EmergencyUnstick();   // застрял (старый баг) — отлипнуть
@@ -1921,6 +1921,22 @@ public partial class Plugin : BaseUnityPlugin
         if (dn == null) { Log.LogWarning("[M] DayNightManager не найден."); return; }
         dn.timeOfDay = 12f;
         Log.LogWarning($"[M] Время переведено на полдень (было {dn.timeOfDay:0.0}), isDay={dn.isDay}.");
+    }
+
+    /// <summary>ВРЕМЕННО: что из сетевого/ботов вообще доступно в текущей сцене.</summary>
+    private void ProbeNetwork()
+    {
+        var spawners = Object.FindObjectsByType<BotSpawner>(FindObjectsSortMode.None);
+        var chars = Object.FindObjectsByType<Character>(FindObjectsSortMode.None);
+        Log.LogWarning($"[NET] BotSpawner в сцене: {spawners.Length}; " +
+                       $"botPrefab задан: {(spawners.Length > 0 && spawners[0].botPrefab != null)}");
+        Log.LogWarning($"[NET] Character в сцене: {chars.Length}");
+        foreach (var c in chars)
+            Log.LogWarning($"[NET]   '{c.name}' isBot={c.isBot} IsLocal={c.IsLocal} " +
+                           $"viewID={(c.photonView != null ? c.photonView.ViewID : -1)}");
+        Log.LogWarning($"[NET] PhotonNetwork: InRoom={PhotonNetwork.InRoom} " +
+                       $"IsMaster={PhotonNetwork.IsMasterClient} Offline={PhotonNetwork.OfflineMode} " +
+                       $"игроков={(PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.PlayerCount : 0)}");
     }
 
     /// <summary>Печатает список доступных ртов — чтобы вписать нужный в конфиг BlindMouthName.</summary>
