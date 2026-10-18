@@ -34,7 +34,6 @@ public partial class Plugin : BaseUnityPlugin
     private int _debugLayer;   // 0 всё, 1 без звезды, 2 без блика, 3 без прожектора, 4 всё выкл
 
     // рескин бинокля → зеркало
-    private const ushort BinocularsItemId = 125;
     // Отдельный слой для модели зеркала: камера рисует все слои, а спот-лайт зайчика
     // этот слой исключает — иначе зайчик подсвечивает заднюю крышку прямо перед лицом.
     private const int MirrorLayer = 31;
@@ -55,7 +54,6 @@ public partial class Plugin : BaseUnityPlugin
     private ReflectionProbe? _probe;
     private float _probeTimer;
     private Transform? _discMesh;            // сам диск (для наклона)
-    private Quaternion _discBaseRot;         // исходный поворот, от него отсчитываем наклон
     private GameObject? _cloneGo;
     private readonly System.Collections.Generic.List<(Item item, GameObject model)> _reskins = new();
     private ConfigEntry<float> _tpDistance = null!;
@@ -115,8 +113,6 @@ public partial class Plugin : BaseUnityPlugin
     private bool _spotHasPos;
     private float _lastSunLog;
     private Character? _victim;
-    private float _timeOnVictim;
-    private bool _emotePlayed, _stunned;
 
     private void Awake()
     {
@@ -158,7 +154,7 @@ public partial class Plugin : BaseUnityPlugin
         // именно эта пелена и была «туманом», который не снимался ни слоями [O], ни клавишей U.
         _nativeBlindOnSelf = Config.Bind("Emote", "NativeBlindOnSelf", false, "Вешать нативное ослепление игры (с экранной пеленой) на СЕБЯ. Для тестов обычно false — слепит только звезда.");
         _blindMouth = Config.Bind("Emote", "BlindMouthName", "", "Рот ослеплённого: имя варианта из Customization.mouths (список печатает клавиша N). Пусто — рот не менять.");
-        _poseFreezeAt = Config.Bind("Emote", "PoseFreezeAt", 0.35f, "Кадр клипа эмоута (0..1), на котором держим позу. Подбор в игре: ; раньше, ' позже.");
+        _poseFreezeAt = Config.Bind("Emote", "PoseFreezeAt", 0.35f, "Кадр клипа эмоута (0..1), на котором держим позу. Подбор в игре: F9 раньше, F10 позже.");
         _showModel     = Config.Bind("Model", "ShowModel", true, "Показывать модель зеркала в руке.");
         _targetSize    = Config.Bind("Model", "BaseSize", 0.3f, "Габарит модели (метры).");
         _heldScale     = Config.Bind("Model", "HeldScale", 1f, "Множитель масштаба.");
@@ -271,10 +267,10 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[Key.U].wasPressedThisFrame) EmergencyUnstick();   // застрял (старый баг) — отлипнуть
         if (kb[Key.P].wasPressedThisFrame) DebugBoardFlight();  // сразу вылететь на остров (отладка)
         if (kb[Key.M].wasPressedThisFrame) DebugNoon();         // перевести время на полдень (отладка)
-        // Живая подстройка момента заморозки позы: ; раньше, ' позже.
+        // Живая подстройка кадра позы: F9 раньше, F10 позже.
         // Config.Save() обязателен — иначе значение потеряется при следующей пересборке.
-        bool poseMinus = kb[Key.Semicolon].wasPressedThisFrame;
-        bool posePlus  = kb[Key.Quote].wasPressedThisFrame;
+        bool poseMinus = kb[Key.F9].wasPressedThisFrame;
+        bool posePlus  = kb[Key.F10].wasPressedThisFrame;
         if (poseMinus || posePlus)
         {
             _poseFreezeAt.Value = Mathf.Clamp01(_poseFreezeAt.Value + (posePlus ? 0.05f : -0.05f));
@@ -610,15 +606,6 @@ public partial class Plugin : BaseUnityPlugin
         _lastLocalHitTime = Time.time;
     }
 
-    // Держим ли мы сейчас бинокль-зеркало (id 125)?
-    private Item? HeldMirrorItem()
-    {
-        var me = Character.localCharacter;
-        var it = me?.data?.currentItem;
-        if (it != null && it.itemID == BinocularsItemId) return it;
-        return null;
-    }
-
     // === Тест: выдать реальный предмет (бинокль) в руку — для рескина в зеркало ===
     private void GiveBinoculars()
     {
@@ -650,26 +637,6 @@ public partial class Plugin : BaseUnityPlugin
     }
 
     // Разовый дамп структуры руководства: какие меши/материалы, чтобы понять, что делать зеркальным.
-    private bool _guideLogged;
-    private void LogGuidebookOnce()
-    {
-        if (_guideLogged) return;
-        var gb = Object.FindObjectsByType<Guidebook>(FindObjectsSortMode.None);
-        if (gb.Length == 0) return;
-        _guideLogged = true;
-        foreach (var g in gb)
-        {
-            Log.LogInfo($"=== GUIDEBOOK '{g.name}' id={g.itemID} scale={g.transform.lossyScale} ===");
-            foreach (var r in g.GetComponentsInChildren<Renderer>(true))
-            {
-                string mats = "";
-                foreach (var m in r.sharedMaterials) mats += (m != null ? m.name : "null") + " ";
-                Log.LogInfo($"   rend '{r.name}' type={r.GetType().Name} enabled={r.enabled} mats=[{mats.Trim()}] path={GetPath(r.transform)}");
-            }
-            Log.LogInfo("=== конец дампа руководства ===");
-        }
-    }
-
     private void LogItemsOnce()
     {
         if (_itemsLogged) return;
@@ -689,14 +656,6 @@ public partial class Plugin : BaseUnityPlugin
         {
             Log.LogWarning($"LogItemsOnce: {e.GetType().Name}: {e.Message}");
         }
-    }
-
-    // === Рескин от Item.OnEnable (мировой/3-е лицо) ===
-    internal void ReskinBinoculars(Item item)
-    {
-        if (item == null || !_reskinEnabled.Value) return;
-        LogBinocularRenderersOnce(item);
-        ReskinBinocularTransform(item.transform, $"id={item.itemID} '{item.name}'");
     }
 
     // Периодически рескиним ВСЕ бинокли в сцене: 1-е лицо (Binoculars(Clone)), тело в 3-м лице, мировые.
@@ -1194,86 +1153,6 @@ public partial class Plugin : BaseUnityPlugin
         catch (System.Exception e) { Log.LogWarning($"ScanShiny: {e.GetType().Name}: {e.Message}"); }
     }
 
-    private void ScanBinocularsNow()
-    {
-        try
-        {
-            var cam = Camera.main;
-            var me = Character.localCharacter;
-            Log.LogInfo($"=== SCAN (N). Camera.main pos={(cam!=null?cam.transform.position.ToString():"null")} me={(me!=null?me.transform.position.ToString():"null")} ===");
-
-            Log.LogInfo("-- ВСЕ предметы id=125 --");
-            foreach (var it in Resources.FindObjectsOfTypeAll<Item>())
-            {
-                if (it == null || it.itemID != 125) continue;
-                var child = it.transform.Find("SunMirrorReskin");
-                var mr = it.mainRenderer;
-                string holder = "?";
-                try { var h = it.GetComponent<Item>(); holder = (it.transform.root != null ? it.transform.root.name : "?"); } catch {}
-                Log.LogInfo($"   Item '{it.name}' active={it.gameObject.activeInHierarchy} inst={it.GetInstanceID()} " +
-                            $"hasMirror={(child!=null)} mainR.enabled={(mr!=null?mr.enabled.ToString():"-")} mainR.forceOff={(mr!=null?mr.forceRenderingOff.ToString():"-")} " +
-                            $"pos={it.transform.position} root='{holder}'");
-            }
-
-            if (cam != null)
-            {
-                Vector3 cp = cam.transform.position;
-                Log.LogInfo("-- рендереры В ПРЕДЕЛАХ 3м от камеры (viewmodel в руках) --");
-                foreach (var r in Resources.FindObjectsOfTypeAll<Renderer>())
-                {
-                    if (r == null || !r.gameObject.activeInHierarchy || !r.enabled || r.forceRenderingOff) continue;
-                    if (r is ParticleSystemRenderer) continue;
-                    float d = Vector3.Distance(r.transform.position, cp);
-                    if (d > 3f) continue;
-                    Log.LogInfo($"   NEAR d={d:0.00} '{r.name}' layer={LayerMask.LayerToName(r.gameObject.layer)}({r.gameObject.layer}) path={GetPath(r.transform)}");
-                }
-            }
-
-            Log.LogInfo("-- активные видимые 'binocular' рендереры --");
-            foreach (var r in Resources.FindObjectsOfTypeAll<Renderer>())
-            {
-                if (r == null) continue;
-                string p = GetPath(r.transform);
-                bool match = p.ToLowerInvariant().Contains("binocular") || r.name.ToLowerInvariant().Contains("binocular");
-                if (!match) continue;
-                if (!r.gameObject.activeInHierarchy || !r.enabled || r.forceRenderingOff) continue; // только реально рисуемые
-                Log.LogInfo($"   VIS '{r.name}' layer={LayerMask.LayerToName(r.gameObject.layer)}({r.gameObject.layer}) pos={r.transform.position} path={p}");
-            }
-            Log.LogInfo("-- все камеры --");
-            foreach (var c in Resources.FindObjectsOfTypeAll<Camera>())
-            {
-                if (c == null || !c.isActiveAndEnabled) continue;
-                Log.LogInfo($"   cam '{c.name}' depth={c.depth} mask={c.cullingMask} pos={c.transform.position} path={GetPath(c.transform)}");
-            }
-            Log.LogInfo("=== конец SCAN ===");
-        }
-        catch (System.Exception e) { Log.LogWarning($"ScanBinoculars: {e.GetType().Name}: {e.Message}"); }
-    }
-
-    private bool _binoLogged;
-    private void LogBinocularRenderersOnce(Item item)
-    {
-        if (_binoLogged) return;
-        _binoLogged = true;
-        try
-        {
-            Log.LogInfo($"=== BINO item '{item.name}' lossyScale={item.transform.lossyScale} mainRenderer={(item.mainRenderer!=null?item.mainRenderer.name:"null")} addtl={(item.addtlRenderers!=null?item.addtlRenderers.Length:0)} ===");
-            Log.LogInfo("-- renderers ПОД предметом --");
-            foreach (var r in item.GetComponentsInChildren<Renderer>(true))
-                Log.LogInfo($"   '{r.name}' type={r.GetType().Name} enabled={r.enabled} path={GetPath(r.transform)}");
-            Log.LogInfo("-- renderers в сцене со словом 'binocular' --");
-            foreach (var r in Resources.FindObjectsOfTypeAll<Renderer>())
-            {
-                if (r == null) continue;
-                string p = GetPath(r.transform);
-                if (p.ToLowerInvariant().Contains("binocular") || r.name.ToLowerInvariant().Contains("binocular"))
-                    Log.LogInfo($"   scene '{r.name}' enabled={r.enabled} active={r.gameObject.activeInHierarchy} path={p}");
-            }
-            Log.LogInfo("=== конец BINO дампа ===");
-        }
-        catch (System.Exception e) { Log.LogWarning($"LogBinocularRenderers: {e.GetType().Name}: {e.Message}"); }
-    }
-
     private static string GetPath(Transform t)
     {
         var sb = new System.Text.StringBuilder(t.name);
@@ -1427,6 +1306,10 @@ public partial class Plugin : BaseUnityPlugin
         return bestD < float.MaxValue;
     }
 
+    private float _timeOnVictim;
+    private bool _emotePlayed, _stunned;
+    private void ClearTarget() { _victim = null; _timeOnVictim = 0f; _emotePlayed = false; _stunned = false; }
+
     private void UpdateSpot()
     {
         var me = Character.localCharacter;
@@ -1525,7 +1408,6 @@ public partial class Plugin : BaseUnityPlugin
         return true;
     }
 
-    private void ClearTarget() { _victim = null; _timeOnVictim = 0f; _emotePlayed = false; _stunned = false; }
 
     // Поверхность — зеркало? (аэропортовое зеркало / фотобудка / любой Mirror-объект)
     private static bool IsMirrorSurface(Collider col)
@@ -1738,7 +1620,6 @@ public partial class Plugin : BaseUnityPlugin
     private Character? _blindVictim;
     private float _blindUntil;
     private bool _blindForcePrev;
-    private bool _blindRendPrev;
     private float _blindStarted;
     private bool _animFrozen;
     private bool _lockLook;
@@ -2057,17 +1938,6 @@ public partial class Plugin : BaseUnityPlugin
         }
     }
 
-    private void StunNow(Character victim)
-    {
-        Log.LogInfo($"StunNow -> {victim.name} (Fall {_fallSeconds.Value}s)");
-        victim.photonView.RPC("RPCA_FallWithScreenShake", RpcTarget.All, _fallSeconds.Value, _fallShake.Value);
-        if (_applyStatuses.Value && victim.refs?.afflictions != null)
-        {
-            victim.refs.afflictions.AddStatus(CharacterAfflictions.STATUSTYPE.Spores, _sporesAmount.Value);
-            victim.refs.afflictions.AddStatus(CharacterAfflictions.STATUSTYPE.Drowsy, _drowsyAmount.Value);
-        }
-    }
-
     private void SelfRagdollTest()
     {
         var me = Character.localCharacter;
@@ -2081,12 +1951,6 @@ public partial class Plugin : BaseUnityPlugin
         Log.LogInfo("SelfTest: blind on self (no fall).");
     }
 
-    private IEnumerator StunAfterDelay(Character victim, float delay)
-    {
-        yield return new WaitForSeconds(delay);
-        if (victim != null) StunNow(victim);
-    }
-
     private void LogEmotesOnce()
     {
         if (_emotesLogged) return;
@@ -2098,6 +1962,27 @@ public partial class Plugin : BaseUnityPlugin
             foreach (var e in all) Log.LogInfo($"  emoteName='{e.emoteName}'  localized='{SafeLocalize(e.emoteName)}'  anim='{e.anim}'");
         }
         catch (System.Exception ex) { Log.LogWarning($"Emote listing failed: {ex.Message}"); }
+    }
+
+    private GameObject? GetMirrorPrototype()
+    {
+        if (_mirrorPrototype != null) return _mirrorPrototype;
+        if (_triedLoad) return null;
+        _triedLoad = true;
+
+        string dir = Path.GetDirectoryName(Info.Location) ?? Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
+        string path = Path.Combine(dir, "mirror.glb");
+        if (!File.Exists(path)) { Log.LogError($"mirror.glb not found: {path}"); return null; }
+
+        var root = GlbLoader.Load(File.ReadAllBytes(path), "SunMirrorModel");
+        if (root == null) return null;
+
+        RecenterAndScale(root, _targetSize.Value);
+        TuneMirrorMaterial(root);
+        root.SetActive(false);
+        Object.DontDestroyOnLoad(root);
+        _mirrorPrototype = root;
+        return root;
     }
 
     // ── взять/убрать зеркало ──
@@ -2177,27 +2062,6 @@ public partial class Plugin : BaseUnityPlugin
             }
         }
         catch (System.Exception e) { Log.LogWarning($"LogHandBones failed: {e.Message}"); }
-    }
-
-    private GameObject? GetMirrorPrototype()
-    {
-        if (_mirrorPrototype != null) return _mirrorPrototype;
-        if (_triedLoad) return null;
-        _triedLoad = true;
-
-        string dir = Path.GetDirectoryName(Info.Location) ?? Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
-        string path = Path.Combine(dir, "mirror.glb");
-        if (!File.Exists(path)) { Log.LogError($"mirror.glb not found: {path}"); return null; }
-
-        var root = GlbLoader.Load(File.ReadAllBytes(path), "SunMirrorModel");
-        if (root == null) return null;
-
-        RecenterAndScale(root, _targetSize.Value);
-        TuneMirrorMaterial(root);
-        root.SetActive(false);
-        Object.DontDestroyOnLoad(root);
-        _mirrorPrototype = root;
-        return root;
     }
 
     private static void RecenterAndScale(GameObject root, float targetSize)
