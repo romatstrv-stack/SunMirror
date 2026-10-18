@@ -99,6 +99,7 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<bool> _debugKeys = null!;
     private ConfigEntry<float> _signalGrow = null!;
     private ConfigEntry<float> _signalMax = null!;
+    private ConfigEntry<float> _beamLinger = null!;
     private ConfigEntry<float> _maxBlind = null!;
     private ConfigEntry<float> _cooldown = null!;
     private ConfigEntry<float> _flinchForce = null!;
@@ -164,6 +165,7 @@ public partial class Plugin : BaseUnityPlugin
         _signalGrow = Config.Bind("Spot", "SignalGrowPerMeter", 0.02f, "Насколько вспышка на зеркале растёт с каждым метром — чтобы её было видно издалека.");
         _signalMax = Config.Bind("Spot", "SignalMaxSize", 3.5f, "Потолок размера вспышки. Без него на дальней дистанции зеркало заслоняет пол-экрана.");
         _maxBlind = Config.Bind("Emote", "MaxBlindSeconds", 5f, "Потолок непрерывного ослепления. Дольше держать нельзя: иначе зеркалом можно просто выключить человека из игры.");
+        _beamLinger = Config.Bind("Emote", "BeamLingerSeconds", 1f, "Сколько ослепление держится после того, как луч ушёл с глаз. Он же задаёт, скольких можно держать разом, проводя лучом по группе.");
         _cooldown = Config.Bind("Emote", "CooldownSeconds", 4f, "Пауза, в течение которой ту же цель ослепить нельзя. Защита от удержания в цикле.");
         _flinchForce = Config.Bind("Emote", "VanillaFlinchForce", 14f, "Сила отдёргивания головы. Больше 30 валит персонажа — нам нужно вздрагивание, а не нокдаун.");
         // Нативное ослепление игры рисует СВОЮ пелену на весь экран (IllegalScreenEffect, статус "BLIND").
@@ -225,7 +227,7 @@ public partial class Plugin : BaseUnityPlugin
         try
         {
             Camera.onPreCull -= OnCamPreCull;   // иначе после hot-reload останется висеть подписка
-            RestoreBlind();                    // вернуть движение и глаза жертве
+            RestoreAllBlinds();                // вернуть движение и глаза всем жертвам
             EmergencyUnstick();                // страховка: движение точно не осталось нулевым
 
             // Удаляем ВСЕ наши объекты в сцене по имени. Раньше чистились только объекты
@@ -411,7 +413,7 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[Key.L].wasPressedThisFrame)                    // L — зеркало начинает ловить зайчика
         {
             _rigAiming = !_rigAiming; _rigAim = 0f;
-            if (!_rigAiming) RestoreBlind();
+            if (!_rigAiming) RestoreAllBlinds();
             Log.LogInfo($"Стенд наводит зайчика: {_rigAiming}");
         }
         if (kb[Key.J].wasPressedThisFrame)
@@ -520,7 +522,7 @@ public partial class Plugin : BaseUnityPlugin
 
         // Фиксация взгляда нужна и когда зеркала в руках нет (тест со стендом),
         // поэтому делаем это ДО проверки на предмет в руках.
-        if (_lockLook && _blindVictim != null) cam.transform.rotation = _lockedRot;
+        if (_lockLook) cam.transform.rotation = _lockedRot;
 
         if (_cloneGo == null) return;
 
@@ -557,7 +559,7 @@ public partial class Plugin : BaseUnityPlugin
         {
             Object.Destroy(_testRig);
             _testRig = null;
-            RestoreBlind();
+            RestoreAllBlinds();
             Log.LogInfo("Тестовый стенд убран.");
             return;
         }
@@ -1373,7 +1375,7 @@ public partial class Plugin : BaseUnityPlugin
 
         // пока светим в глаза — ослепление (глаза, рот, поза, обездвиживание), без падения.
         // Шлём по сети: эффект должен примениться на клиенте жертвы и у всех зрителей.
-        SendBlind(victim, 1.0f);
+        SendBlind(victim, _beamLinger.Value);
     }
 
     // Солнце реально попадает: над горизонтом + луч к солнцу не перекрыт реальным объектом
@@ -1609,21 +1611,35 @@ public partial class Plugin : BaseUnityPlugin
     }
 
     // ── Ослепление: стоит на месте (rooted) БЕЗ падения. Спиральные глаза/zzz — best-effort. ──
-    private Character? _blindVictim;
-    private float _blindUntil;
-    private bool _blindForcePrev;
-    private float _blindStarted;
-    private bool _animFrozen;
+    /// <summary>
+    /// Состояние ослепления ОДНОЙ жертвы. Раньше всё это были одиночные поля, то есть
+    /// мод физически не мог держать двоих: при смене цели эффект с предыдущей снимался.
+    /// В соло это незаметно, а если провести лучом по группе — слетает с каждого.
+    /// </summary>
+    private sealed class BlindState
+    {
+        public float until;              // до какого момента держится
+        public float beganAt;            // начало непрерывного ослепления (для потолка)
+        public float emoteStarted;       // когда проиграли эмоут (для задержки позы)
+        public bool posePinned;
+        public bool forcePrev;
+        public string emoteState = "";
+        public CharacterMovement? mv;    // только если жертва — локальный игрок
+        public float moveModPrev = 1f;
+        // Бэкап текстур лица СВОЙ у каждой жертвы: общий список возвращал чужие текстуры.
+        public readonly System.Collections.Generic.List<(Material mat, string prop, Texture? tex)> faceBackup = new();
+    }
+
+    private readonly Dictionary<Character, BlindState> _blinds = new();
     private bool _lockLook;
     private Quaternion _lockedRot;
     private Character? _lastEmoteVictim;
     private float _lastEmoteTime = -99f;
     // Оригинальные текстуры глаз, чтобы вернуть после ослепления
-    private readonly System.Collections.Generic.List<(Material mat, string prop, Texture? tex)> _eyeBackup = new();
 
     // Ставим Eye_Spin ПРЯМО на рендереры глаз. Через CurrentEyeTexture не работает:
     // игра сама пересчитывает её каждый кадр и возвращает обычные глаза.
-    private void ApplyEyeTexture(CharacterCustomization cc, Texture? tex, bool backup)
+    private void ApplyEyeTexture(CharacterCustomization cc, Texture? tex, System.Collections.Generic.List<(Material, string, Texture?)>? backup)
     {
         if (cc == null || cc.refs == null || cc.refs.EyeRenderers == null || tex == null) return;
         string[] props = { "_BaseTexture", "_BaseMap", "_MainTex", "_Texture1" };
@@ -1634,7 +1650,7 @@ public partial class Plugin : BaseUnityPlugin
             foreach (var p in props)
             {
                 if (!m.HasProperty(p)) continue;
-                if (backup) _eyeBackup.Add((m, p, m.GetTexture(p)));
+                backup?.Add((m, p, m.GetTexture(p)));
                 m.SetTexture(p, tex);
             }
         }
@@ -1646,7 +1662,7 @@ public partial class Plugin : BaseUnityPlugin
     /// Варианты лежат в Customization.mouths; ищем по имени из конфига.
     /// Бэкап кладём в тот же список, что и для глаз, — он восстанавливает всё лицо разом.
     /// </summary>
-    private void ApplyMouthTexture(CharacterCustomization cc, bool backup)
+    private void ApplyMouthTexture(CharacterCustomization cc, System.Collections.Generic.List<(Material, string, Texture?)>? backup)
     {
         if (string.IsNullOrWhiteSpace(_blindMouth.Value)) return;
         var r = cc.refs?.mouthRenderer;
@@ -1658,7 +1674,7 @@ public partial class Plugin : BaseUnityPlugin
         foreach (var prop in props)
         {
             if (!m.HasProperty(prop)) continue;
-            if (backup) _eyeBackup.Add((m, prop, m.GetTexture(prop)));
+            backup?.Add((m, prop, m.GetTexture(prop)));
             m.SetTexture(prop, tex);
         }
     }
@@ -1681,18 +1697,15 @@ public partial class Plugin : BaseUnityPlugin
         return null;
     }
 
-    private void RestoreEyeTextures()
+    private static void RestoreFaceTextures(System.Collections.Generic.List<(Material mat, string prop, Texture? tex)> backup)
     {
-        foreach (var (mat, prop, tex) in _eyeBackup)
+        foreach (var (mat, prop, tex) in backup)
             if (mat != null) mat.SetTexture(prop, tex);
-        _eyeBackup.Clear();
+        backup.Clear();
     }
     private ConfigEntry<float> _poseFreezeDelay = null!;
     private ConfigEntry<float> _blindHoldSeconds = null!;
-    private float _moveModPrev = 1f;
-    private float _blindBeganAt;                                   // начало НЕПРЕРЫВНОГО ослепления
     private readonly Dictionary<int, float> _cooldownUntil = new();  // ключ — ViewID цели
-    private CharacterMovement? _blindMv;
 
     /// <summary>
     /// Коротко отдёргивает голову жертвы назад — как от света в глаза.
@@ -1826,18 +1839,22 @@ public partial class Plugin : BaseUnityPlugin
         int key = VictimKey(victim);
         if (_cooldownUntil.TryGetValue(key, out float until) && Time.time < until) return;
 
-        if (_blindVictim == victim && _maxBlind.Value > 0f &&
-            Time.time - _blindBeganAt >= _maxBlind.Value)
+        if (_blinds.TryGetValue(victim, out var st))
         {
-            _cooldownUntil[key] = Time.time + Mathf.Max(0f, _cooldown.Value);
-            Log.LogInfo($"Ослепление прервано по потолку {_maxBlind.Value:0.0} с; " +
-                        $"повтор по этой цели не раньше чем через {_cooldown.Value:0.0} с.");
-            RestoreBlind();
-            return;
+            if (_maxBlind.Value > 0f && Time.time - st.beganAt >= _maxBlind.Value)
+            {
+                _cooldownUntil[key] = Time.time + Mathf.Max(0f, _cooldown.Value);
+                Log.LogInfo($"Ослепление '{victim.name}' прервано по потолку {_maxBlind.Value:0.0} с; " +
+                            $"повтор не раньше чем через {_cooldown.Value:0.0} с.");
+                RestoreBlind(victim);
+                return;
+            }
         }
-
-        if (_blindVictim != victim) { RestoreBlind(); BeginBlind(victim); _blindBeganAt = Time.time; }
-        _blindUntil = Time.time + linger;
+        else
+        {
+            st = BeginBlind(victim);
+        }
+        st.until = Time.time + linger;
 
         // Настоящее сетевое ослепление (видно всем, не только держателю зеркала).
         // Affliction сама умеет освежать себя повторным AddAffliction (Stack/OnStacked) —
@@ -1859,125 +1876,114 @@ public partial class Plugin : BaseUnityPlugin
         return v != null && v.ViewID != 0 ? v.ViewID : c.GetInstanceID();
     }
 
-    private void BeginBlind(Character victim)
+    private BlindState BeginBlind(Character victim)
     {
-        _blindVictim = victim;
+        var st = new BlindState { beganAt = Time.time };
+        _blinds[victim] = st;
 
         var cc = victim.GetComponentInChildren<CharacterCustomization>();
         if (cc != null && cc.passedOutEyes != null)
         {
-            _blindForcePrev = cc.forcePresetEyes;
+            st.forcePrev = cc.forcePresetEyes;
             cc.forcePresetEyes = true;
             cc.CurrentEyeTexture = cc.passedOutEyes;
-            RestoreEyeTextures();                            // на случай незакрытого прошлого раза
-            ApplyEyeTexture(cc, cc.passedOutEyes, true);     // Eye_Spin прямо на рендереры
-            ApplyMouthTexture(cc, true);                     // и рот ослеплённого
+            ApplyEyeTexture(cc, cc.passedOutEyes, st.faceBackup);   // Eye_Spin прямо на рендереры
+            ApplyMouthTexture(cc, st.faceBackup);                   // и рот ослеплённого
         }
 
-        // blindRenderer игры НЕ включаем: он рисует звёздочки поверх глаз, а нам нужны
-        // только спиральные глаза. Лишний слой мешал читать эффект.
-
         // Эмоут НЕ переигрываем, если совсем недавно уже играли на этом же персонаже.
-        // Иначе при перезапуске эффекта руки опускаются и поднимаются заново —
-        // это и выглядело как «реакция сработала и пропала».
+        // Иначе при перезапуске эффекта руки опускаются и поднимаются заново.
         bool replayEmote = victim != _lastEmoteVictim || Time.time - _lastEmoteTime > 4f;
         if (replayEmote) { _lastEmoteVictim = victim; _lastEmoteTime = Time.time; }
 
-        // Проигрываем эмоут «закрыть глаза руками» ОДИН раз и запоминаем момент старта:
-        // через мгновение анимацию заморозим, иначе она доигрывает и руки опускаются —
-        // отсюда и был цикл «закрыл / открыл / закрыл».
         if (replayEmote && _useEmote.Value && !string.IsNullOrEmpty(_emoteName.Value))
         {
             PlayVictimEmote(victim, _emoteName.Value);
-            _blindStarted = Time.time;
-            _animFrozen = false;
+            st.emoteStarted = Time.time;
+            st.emoteState = _emoteState;
         }
 
-        // Фиксируем направление взгляда: ослеплённый не может отвести глаза.
-        var mcam = Camera.main;
-        _lockLook = victim == Character.localCharacter && mcam != null;
-        if (_lockLook) _lockedRot = mcam!.transform.rotation;
-
-        Log.LogInfo($"Blind begin: passedOutEyes={(cc != null && cc.passedOutEyes != null ? cc.passedOutEyes.name : "НЕТ")} " +
-                    $"deadEyes={(cc != null && cc.deadEyes != null ? cc.deadEyes.name : "НЕТ")} " +
-                    $"blindRenderer={(cc != null && cc.refs != null && cc.refs.blindRenderer != null ? "есть" : "НЕТ")} " +
-                    $"animator={(cc != null && cc.PlayerAnimator != null ? "есть" : "НЕТ")}");
-        // ВАЖНО: Drowsy сюда НЕ добавляем — это настоящий игровой статус сна (Zzzz),
-        // при накоплении запускает штатный passOut игры, который перехватывает управление
-        // и держит персонажа залипшим уже средствами самой игры (наш movementModifier это не пробивает).
-        // Из-за повторного захвата цели (дрожание мыши) статус суммировался и залипал персонажа.
-
-        // rooted: стоит на месте — только для локального игрока. Запоминаем ИСХОДНОЕ значение,
-        // чтобы гарантированно вернуть (иначе персонаж застревает навсегда).
-        _blindMv = null;
+        // Фиксируем направление взгляда — только своей камере.
         if (victim == Character.localCharacter)
         {
-            _blindMv = victim.GetComponentInChildren<CharacterMovement>();
-            if (_blindMv != null) _moveModPrev = _blindMv.movementModifier;
+            var mcam = Camera.main;
+            _lockLook = mcam != null;
+            if (_lockLook) _lockedRot = mcam!.transform.rotation;
+
+            // rooted: стоит на месте. Запоминаем ИСХОДНОЕ значение движения,
+            // чтобы гарантированно вернуть (иначе персонаж застревает навсегда).
+            st.mv = victim.GetComponentInChildren<CharacterMovement>();
+            if (st.mv != null) st.moveModPrev = st.mv.movementModifier;
         }
 
         FlinchHead(victim);
-
-        Log.LogInfo($"Blind begin on {victim.name} moveModPrev={_moveModPrev}");
+        Log.LogInfo($"Blind begin on {victim.name} (всего целей: {_blinds.Count})");
+        return st;
     }
 
     private void TickBlind()
     {
-        if (_blindVictim == null) return;
-        if (Time.time >= _blindUntil)
-        {
-            Log.LogInfo($"Blind END: истёк срок (сейчас {Time.time:0.0}, до {_blindUntil:0.0}) — значит стенд перестал обновлять эффект");
-            RestoreBlind(); return;
-        }
+        if (_blinds.Count == 0) return;
 
-        // спиральные глаза держим (Update кастомизации иначе вернёт обычные)
-        var cc = _blindVictim.GetComponentInChildren<CharacterCustomization>();
-        if (cc != null)
+        // Список ключей копируем: внутри цикла снимаем эффект и меняем словарь.
+        _blindScratch.Clear();
+        foreach (var kv in _blinds) _blindScratch.Add(kv.Key);
+
+        foreach (var victim in _blindScratch)
         {
-            if (cc.passedOutEyes != null)
+            if (victim == null) { _blinds.Remove(victim!); continue; }
+            if (!_blinds.TryGetValue(victim, out var st)) continue;
+
+            if (Time.time >= st.until) { RestoreBlind(victim); continue; }
+
+            var cc = victim.GetComponentInChildren<CharacterCustomization>();
+            if (cc != null)
             {
-                cc.forcePresetEyes = true;
-                cc.CurrentEyeTexture = cc.passedOutEyes;
-                ApplyEyeTexture(cc, cc.passedOutEyes, false);   // держим спирали каждый кадр
-                ApplyMouthTexture(cc, false);                  // и рот — игра его тоже перезаписывает
-            }
-            // ЗАМОРОЗКА ПОЗЫ: даём эмоуту доиграть до момента, когда руки у глаз,
-            // и останавливаем аниматор. Иначе анимация завершается и руки опускаются.
-            // УДЕРЖАНИЕ ПОЗЫ. animator.speed = 0 не работает: персонаж в PEAK —
-            // физическая кукла, аниматор лишь задаёт ей цели, и при остановленном
-            // аниматоре конечности расслабляются обратно в стойку.
-            // Поэтому КАЖДЫЙ кадр заново ставим то же состояние на тот же кадр клипа —
-            // поза стоит намертво. Плюс держим флаг "Emote": штатный Update игры
-            // гасит его через 2 секунды, и состояние эмоута вытеснилось бы локомоцией.
-            var an = cc.PlayerAnimator;
-            if (an != null && !string.IsNullOrEmpty(_emoteState) &&
-                Time.time - _blindStarted >= _poseFreezeDelay.Value)
-            {
-                an.speed = 1f;
-                an.SetBool("Emote", true);
-                an.Play(_emoteState, 0, Mathf.Clamp01(_poseFreezeAt.Value));
-                if (!_animFrozen)
+                if (cc.passedOutEyes != null)
                 {
-                    _animFrozen = true;
-                    Log.LogInfo($"Поза удерживается: состояние '{_emoteState}' кадр {_poseFreezeAt.Value:0.00}");
+                    cc.forcePresetEyes = true;
+                    cc.CurrentEyeTexture = cc.passedOutEyes;
+                    ApplyEyeTexture(cc, cc.passedOutEyes, null);   // держим спирали каждый кадр
+                    ApplyMouthTexture(cc, null);                   // и рот — игра его тоже перезаписывает
+                }
+
+                // УДЕРЖАНИЕ ПОЗЫ. animator.speed = 0 не работает: персонаж в PEAK —
+                // физическая кукла, аниматор лишь задаёт ей цели, и при остановленном
+                // аниматоре конечности расслабляются обратно в стойку.
+                // Поэтому КАЖДЫЙ кадр заново ставим то же состояние на тот же кадр клипа.
+                // Плюс держим флаг "Emote": штатный Update игры гасит его через 2 секунды.
+                var an = cc.PlayerAnimator;
+                if (an != null && !string.IsNullOrEmpty(st.emoteState) &&
+                    Time.time - st.emoteStarted >= _poseFreezeDelay.Value)
+                {
+                    an.speed = 1f;
+                    an.SetBool("Emote", true);
+                    an.Play(st.emoteState, 0, Mathf.Clamp01(_poseFreezeAt.Value));
+                    if (!st.posePinned)
+                    {
+                        st.posePinned = true;
+                        Log.LogInfo($"Поза '{victim.name}' удерживается: кадр {_poseFreezeAt.Value:0.00}");
+                    }
                 }
             }
+
+            if (st.mv != null) st.mv.movementModifier = 0f;
+
+            // Звёздочки на глазах и экранная пелена — не наши: их включает нативная
+            // Affliction_Blind. Если её не вешаем, держим погашенными принудительно.
+            if (victim == Character.localCharacter && !_nativeBlindOnSelf.Value)
+                ClearNativeBlind(victim);
         }
-
-        if (_blindMv != null) _blindMv.movementModifier = 0f;
-
-        // Звёздочки на глазах и экранная пелена — не наши: их включает нативная Affliction_Blind.
-        // Если её не вешаем, держим погашенными принудительно (игра могла включить их раньше).
-        if (_blindVictim == Character.localCharacter && !_nativeBlindOnSelf.Value)
-            ClearNativeBlind(_blindVictim);
     }
+
+    private readonly List<Character> _blindScratch = new();
 
     /// <summary>
     /// Снимает ВСЁ нативное ослепление игры: аффликцию, экранную пелену и звёздочки на модели.
     /// Пелену рисует IllegalScreenEffect — отдельный квад у камеры с приватным таймером;
     /// снаружи его гасят только тем же статусом с нулевой длительностью.
     /// Звёздочки игра включает через gameObject.SetActive, а не Renderer.enabled —
-    /// поэтому прежний EmergencyUnstick их и не снимал (отсюда «U вообще ничего не делает»).
+    /// поэтому прежний EmergencyUnstick их и не снимал.
     /// </summary>
     private void ClearNativeBlind(Character? c)
     {
@@ -1994,37 +2000,44 @@ public partial class Plugin : BaseUnityPlugin
         }
     }
 
-    private void RestoreBlind()
+    /// <summary>Снимает ослепление с ОДНОЙ жертвы. Остальные продолжают стоять ослеплёнными.</summary>
+    private void RestoreBlind(Character? victim)
     {
-        if (_blindVictim == null) return;
-        var cc = _blindVictim.GetComponentInChildren<CharacterCustomization>();
-        if (cc != null) cc.forcePresetEyes = _blindForcePrev;   // вернуть обычные глаза
-        RestoreEyeTextures();
-        // Гасим ПРИНУДИТЕЛЬНО всё нативное ослепление: и пелену на экране, и звёздочки.
-        ClearNativeBlind(_blindVictim);
+        if (victim == null || !_blinds.TryGetValue(victim, out var st)) return;
+        _blinds.Remove(victim);
+
+        var cc = victim.GetComponentInChildren<CharacterCustomization>();
+        if (cc != null) cc.forcePresetEyes = st.forcePrev;      // вернуть обычные глаза
+        RestoreFaceTextures(st.faceBackup);
+        ClearNativeBlind(victim);
         if (cc != null && cc.PlayerAnimator != null)
         {
             cc.PlayerAnimator.speed = 1f;                 // вернуть нормальный ход
             cc.PlayerAnimator.SetBool("Emote", false);    // отпустить позу
         }
-        _animFrozen = false;
-        _lockLook = false;                                                            // вернуть управление взглядом
-        if (_blindMv != null) _blindMv.movementModifier = _moveModPrev;   // ОБЯЗАТЕЛЬНО вернуть движение
-        Log.LogInfo($"Blind RESTORE (эффект снят) moveModRestored={_moveModPrev} rigAiming={_rigAiming}");
+        if (st.mv != null) st.mv.movementModifier = st.moveModPrev;   // ОБЯЗАТЕЛЬНО вернуть движение
+        if (victim == Character.localCharacter) _lockLook = false;    // вернуть управление взглядом
+
         // Небольшая пауза после КАЖДОГО снятия: без неё луч, сошедший с глаз на долю
         // секунды, тут же начинает новое ослепление, и получается то же удержание.
         if (_cooldown.Value > 0f)
         {
             // ВАЖНО: не затирать длинную паузу, поставленную при обрыве по потолку.
-            // Из-за этого ослепление заходило по новой сразу после обрыва, и защита
-            // превращалась в мигание «ослепил — отпустил — ослепил».
-            int ck = VictimKey(_blindVictim);
+            int ck = VictimKey(victim);
             float shortUntil = Time.time + _cooldown.Value * 0.5f;
             if (!_cooldownUntil.TryGetValue(ck, out float cur) || cur < shortUntil)
                 _cooldownUntil[ck] = shortUntil;
         }
-        _blindVictim = null;
-        _blindMv = null;
+        Log.LogInfo($"Blind RESTORE '{victim.name}' (осталось целей: {_blinds.Count})");
+    }
+
+    /// <summary>Снимает ослепление со всех разом — выгрузка мода, уборка стенда, аварийный сброс.</summary>
+    private void RestoreAllBlinds()
+    {
+        if (_blinds.Count == 0) return;
+        _blindScratch.Clear();
+        foreach (var kv in _blinds) _blindScratch.Add(kv.Key);
+        foreach (var v in _blindScratch) RestoreBlind(v);
     }
 
     // На случай если персонаж уже застрял из-за предыдущей сборки — сразу возвращаем движение.
@@ -2047,7 +2060,9 @@ public partial class Plugin : BaseUnityPlugin
             { cc.PlayerAnimator.speed = 1f; Log.LogInfo("EmergencyUnstick: анимация разморожена."); }
             cc.forcePresetEyes = false;
         }
-        RestoreEyeTextures();
+        // Снимаем эффект со ВСЕХ, а не только с себя: аварийная клавиша должна
+        // расхлопнуть всё, что мод навесил, включая чужих персонажей.
+        RestoreAllBlinds();
         ClearNativeBlind(me);
         _lockLook = false;
         Log.LogWarning("[U] EmergencyUnstick: нативное ослепление снято (аффликция + пелена + звёздочки), " +
