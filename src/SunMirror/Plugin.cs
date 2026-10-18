@@ -165,7 +165,7 @@ public partial class Plugin : BaseUnityPlugin
         _signalGrow = Config.Bind("Spot", "SignalGrowPerMeter", 0.02f, "Насколько вспышка на зеркале растёт с каждым метром — чтобы её было видно издалека.");
         _signalMax = Config.Bind("Spot", "SignalMaxSize", 3.5f, "Потолок размера вспышки. Без него на дальней дистанции зеркало заслоняет пол-экрана.");
         _maxBlind = Config.Bind("Emote", "MaxBlindSeconds", 5f, "Потолок непрерывного ослепления. Дольше держать нельзя: иначе зеркалом можно просто выключить человека из игры.");
-        _beamLinger = Config.Bind("Emote", "BeamLingerSeconds", 1f, "Сколько ослепление держится после того, как луч ушёл с глаз. Он же задаёт, скольких можно держать разом, проводя лучом по группе.");
+        _beamLinger = Config.Bind("Emote", "BeamLingerSeconds", 3f, "Сколько ослепление держится после того, как луч ушёл с глаз. Он же задаёт, скольких можно держать разом, проводя лучом по группе.");
         _cooldown = Config.Bind("Emote", "CooldownSeconds", 4f, "Пауза, в течение которой ту же цель ослепить нельзя. Защита от удержания в цикле.");
         _flinchForce = Config.Bind("Emote", "VanillaFlinchForce", 14f, "Сила отдёргивания головы. Больше 30 валит персонажа — нам нужно вздрагивание, а не нокдаун.");
         // Нативное ослепление игры рисует СВОЮ пелену на весь экран (IllegalScreenEffect, статус "BLIND").
@@ -1226,13 +1226,11 @@ public partial class Plugin : BaseUnityPlugin
         var cam = Camera.main;
         // Вспышка висит на САМОМ диске. Раньше она привязывалась к старому пропу в руке;
         // после его удаления якоря не стало, и вспышка уехала персонажу на голову.
-        // ОГРАНИЧЕНИЕ: _discMesh — это viewmodel-клон, он живёт у камеры от первого лица.
-        // По замерам вспышка оказывается метрах в шести от персонажа, в воздухе, а не
-        // в его руках. Для СВОЕГО экрана это нормально, но как сигнал для других —
-        // неверно: тиммейт увидит светяшку рядом с тобой, а не на твоём зеркале.
-        // Правильный якорь — настоящий предмет в руках, который рисуют все клиенты.
-        Vector3 pos = _discMesh != null ? _discMesh.position
-                    : me.transform.position + Vector3.up * 1.4f;
+        // Якорь — НАСТОЯЩАЯ рука персонажа, а не viewmodel-клон. Клон живёт у камеры
+        // от первого лица: по замерам вспышка оказывалась метрах в шести от персонажа,
+        // в воздухе. Свой экран этого не выдавал, а тиммейт увидел бы светяшку рядом
+        // с игроком, а не на его зеркале. Кость руки рисуют все клиенты одинаково.
+        Vector3 pos = HandAnchor(me);
         _signal!.transform.position = pos;
         // Разворачиваем вспышку на ТОГО, КТО СМОТРИТ, а не на цель луча.
         // У каждого клиента это его собственная камера — так зеркало «мигает» каждому,
@@ -1252,6 +1250,22 @@ public partial class Plugin : BaseUnityPlugin
         if (_signalLight != null) _signalLight.intensity = 12f * pulse;
         if (!_signal.activeSelf) _signal.SetActive(true);
 
+
+    }
+
+    /// <summary>
+    /// Где у персонажа зеркало с точки зрения ЛЮБОГО наблюдателя: кость правой руки.
+    /// Запасной вариант — грудь, если кость почему-то не отдали.
+    /// </summary>
+    private static Vector3 HandAnchor(Character c)
+    {
+        try
+        {
+            var bp = c.GetBodypart(BodypartType.Hand_R);
+            if (bp != null && bp.transform != null) return bp.transform.position;
+        }
+        catch (System.Exception) { /* у бота или трупа кости может не быть */ }
+        return c.Center;
     }
 
     private void HideSignal() { if (_signal != null && _signal.activeSelf) _signal.SetActive(false); }
@@ -1935,6 +1949,16 @@ public partial class Plugin : BaseUnityPlugin
             if (!_blinds.TryGetValue(victim, out var st)) continue;
 
             if (Time.time >= st.until) { RestoreBlind(victim); continue; }
+
+            // Жертва умерла, отключилась или её вырубило игрой — эффект снимаем,
+            // иначе он останется висеть на трупе или утечёт вместе с персонажем.
+            var d = victim.data;
+            if (d == null || d.dead || d.fullyPassedOut)
+            {
+                Log.LogInfo($"Blind снят с '{victim.name}': персонаж умер или потерял сознание.");
+                RestoreBlind(victim);
+                continue;
+            }
 
             var cc = victim.GetComponentInChildren<CharacterCustomization>();
             if (cc != null)
