@@ -93,6 +93,7 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _spriteBright = null!;
     private ConfigEntry<string> _blindMouth = null!;
     private ConfigEntry<float> _poseFreezeAt = null!;
+    private ConfigEntry<float> _netSendEvery = null!;
     private string _emoteState = "";
     private ConfigEntry<bool> _showModel = null!;
     private ConfigEntry<float> _targetSize = null!, _heldScale = null!;
@@ -149,6 +150,7 @@ public partial class Plugin : BaseUnityPlugin
         _selfTarget    = Config.Bind("Debug", "SelfTarget", false, "Луч всегда бьёт в тебя — тест эффекта без второго игрока (клавиша J).");
         _blindOn       = Config.Bind("Emote", "BlindStars", true, "Ослепление со звёздочками над головой (Affliction_Blind).");
         _blindAfflictionSeconds = Config.Bind("Emote", "BlindAfflictionSeconds", 2.5f, "Мин. длительность нативного Affliction_Blind за одно обновление (сетевое, видно всем).");
+        _netSendEvery = Config.Bind("Emote", "NetSendEverySeconds", 0.25f, "Как часто слать ослепление по сети, пока луч на цели (каждый кадр — флуд).");
         // Нативное ослепление игры рисует СВОЮ пелену на весь экран (IllegalScreenEffect, статус "BLIND").
         // Чужому игроку это и нужно — он без мода, иначе не почувствует ничего. А себе — нет:
         // именно эта пелена и была «туманом», который не снимался ни слоями [O], ни клавишей U.
@@ -266,7 +268,8 @@ public partial class Plugin : BaseUnityPlugin
         //  руководство после перехода на тарелочку — это и были лаги.)
         if (kb[Key.U].wasPressedThisFrame) EmergencyUnstick();   // застрял (старый баг) — отлипнуть
         if (kb[Key.P].wasPressedThisFrame) DebugBoardFlight();  // сразу вылететь на остров (отладка)
-        if (kb[Key.M].wasPressedThisFrame) DebugNoon();         // перевести время на полдень (отладка)
+        if (kb[Key.M].wasPressedThisFrame) DebugNoon();
+        if (kb[Key.F11].wasPressedThisFrame) DebugSpawnBot();  // бот рядом — цель для теста сети         // перевести время на полдень (отладка)
         // Живая подстройка кадра позы: F9 раньше, F10 позже.
         // Config.Save() обязателен — иначе значение потеряется при следующей пересборке.
         bool poseMinus = kb[Key.F9].wasPressedThisFrame;
@@ -317,6 +320,7 @@ public partial class Plugin : BaseUnityPlugin
         UpdateReflectionProbe();
         UpdateRealMirror();
         ApplyDiscTilt();   // применяем и здесь тоже: прослойка наша, перезаписывать её нечему
+        EnsureNetReceivers();
         ReskinAllBinoculars();
         SyncReskins();
 
@@ -602,7 +606,9 @@ public partial class Plugin : BaseUnityPlugin
         // От взгляда зависит только засвет экрана — его считает ViewFactor в Update.
         // Держим эффект ФИКСИРОВАННОЕ время, а не «пока обновляется каждый кадр».
         // Раньше любой сбой обновления (в т.ч. случайное переключение L) мгновенно снимал позу.
-        StartOrRefreshBlind(me, _blindHoldSeconds.Value);
+        // Через тот же сетевой путь, что и боевой луч, — чтобы стенд проверял
+        // настоящий код, а не укороченный локальный дублёр.
+        SendBlind(me, _blindHoldSeconds.Value);
         _lastLocalHitTime = Time.time;
     }
 
@@ -1380,8 +1386,9 @@ public partial class Plugin : BaseUnityPlugin
             _emotePlayed = true;
         }
 
-        // пока светим в глаза — ослепление (спиральные глаза + zzz + rooted), без падения
-        StartOrRefreshBlind(victim, 1.0f);
+        // пока светим в глаза — ослепление (глаза, рот, поза, обездвиживание), без падения.
+        // Шлём по сети: эффект должен примениться на клиенте жертвы и у всех зрителей.
+        SendBlind(victim, 1.0f);
     }
 
     // Солнце реально попадает: над горизонтом + луч к солнцу не перекрыт реальным объектом
@@ -1700,6 +1707,98 @@ public partial class Plugin : BaseUnityPlugin
     private float _moveModPrev = 1f;
     private CharacterMovement? _blindMv;
 
+    // ───────────────────────── сетевой слой ─────────────────────────
+
+    private float _netTick, _netSendAt;
+
+    /// <summary>
+    /// Вешает приёмник RPC на каждого персонажа в сцене. Нужен на ВСЕХ, а не только
+    /// на нас: Photon вызывает метод на объекте жертвы, и объект этот есть у каждого клиента.
+    /// Character.AllCharacters — статический список самой игры, перебор дешёвый.
+    /// </summary>
+    private void EnsureNetReceivers()
+    {
+        _netTick -= Time.deltaTime;
+        if (_netTick > 0f) return;
+        _netTick = 1f;
+
+        foreach (var c in Character.AllCharacters)
+        {
+            if (c == null || c.GetComponent<SunMirrorNet>() != null) continue;
+            c.gameObject.AddComponent<SunMirrorNet>();
+            // Без этого Photon ищет метод в списке компонентов, собранном ДО нас.
+            try { c.photonView?.RefreshRpcMonoBehaviourCache(); }
+            catch (System.Exception e) { Log.LogWarning($"RefreshRpcMonoBehaviourCache: {e.Message}"); }
+            Log.LogInfo($"Сетевой приёмник повешен на '{c.name}' (viewID={c.photonView?.ViewID}).");
+        }
+    }
+
+    /// <summary>
+    /// Шлём ослепление на клиент жертвы. Не каждый кадр: RPC каждый кадр — это флуд,
+    /// поэтому шлём несколько раз в секунду, а длительность берём с запасом.
+    /// </summary>
+    private void SendBlind(Character victim, float seconds)
+    {
+        if (victim == null) return;
+        if (Time.time - _netSendAt < _netSendEvery.Value)
+        {
+            // между посылками эффект всё равно держим локально, чтобы не мигал
+            StartOrRefreshBlind(victim, seconds);
+            return;
+        }
+        _netSendAt = Time.time;
+
+        var me = Character.localCharacter;
+        int shooter = me != null && me.photonView != null ? me.photonView.ViewID : -1;
+        var view = victim.photonView;
+        if (view == null)
+        {
+            Log.LogWarning($"[SEND] у '{victim.name}' нет PhotonView — применяю локально.");
+            StartOrRefreshBlind(victim, seconds); return;
+        }
+        if (view.ViewID == 0)
+        {
+            Log.LogWarning($"[SEND] у '{victim.name}' ViewID=0 (объект не зарегистрирован в сети) — локально.");
+            StartOrRefreshBlind(victim, seconds); return;
+        }
+        if (victim.GetComponent<SunMirrorNet>() == null)
+            Log.LogWarning($"[SEND] на '{victim.name}' нет приёмника SunMirrorNet — RPC не найдёт метод.");
+
+        Log.LogWarning($"[SEND] RPC -> '{victim.name}' viewID={view.ViewID} сек={seconds:0.0} от {shooter}");
+        try { view.RPC(SunMirrorNet.RpcName, RpcTarget.All, seconds, shooter); }
+        catch (System.Exception e)
+        {
+            Log.LogWarning($"RPC ослепления не ушёл ({e.Message}) — применяю локально.");
+            StartOrRefreshBlind(victim, seconds);
+        }
+    }
+
+    /// <summary>
+    /// Выполняется на КАЖДОМ клиенте. Визуал (глаза, рот, поза) ставим всем —
+    /// модель жертвы рисует каждый сам. Управление (обездвиживание, фиксация взгляда,
+    /// засвет экрана) — только на клиенте самой жертвы, этим занимается StartOrRefreshBlind.
+    /// </summary>
+    internal void ApplyNetworkBlind(Character victim, float seconds, int shooterViewID)
+    {
+        StartOrRefreshBlind(victim, seconds);
+
+        if (victim != Character.localCharacter) return;
+
+        // Светят в НАС: засвет экрана и привязка вспышки к зеркалу обидчика.
+        _lastLocalHitTime = Time.time;
+        Character.GetCharacterWithPhotonID(shooterViewID, out var shooter);
+        if (shooter != null && shooter != victim)
+        {
+            _glareSourcePos = shooter.Center;
+            _glareSourceValid = true;
+        }
+        else if (_discMesh != null)      // сами себе (тест) — вспышка на своём зеркале
+        {
+            _glareSourcePos = _discMesh.position;
+            _glareSourceValid = true;
+        }
+    }
+
     // Пока светим в глаза — держим/обновляем ослепление (linger = сколько ещё висит после ухода луча).
     private void StartOrRefreshBlind(Character victim, float linger)
     {
@@ -1920,7 +2019,31 @@ public partial class Plugin : BaseUnityPlugin
         var dn = DayNightManager.instance;
         if (dn == null) { Log.LogWarning("[M] DayNightManager не найден."); return; }
         dn.timeOfDay = 12f;
-        Log.LogWarning($"[M] Время переведено на полдень (было {dn.timeOfDay:0.0}), isDay={dn.isDay}.");
+        // Заодно лечим: при долгой отладке персонаж успевает умереть от голода,
+        // и забег приходится начинать заново.
+        var me = Character.localCharacter;
+        var aff = me?.refs?.afflictions;
+        if (aff != null)
+        {
+            try { aff.ClearAllStatus(excludeCurse: false, excludePetrify: false); }
+            catch (System.Exception e) { Log.LogWarning($"[M] ClearAllStatus: {e.Message}"); }
+        }
+        Log.LogWarning($"[M] Полдень (isDay={dn.isDay}) + статусы сняты.");
+    }
+
+    /// <summary>
+    /// Отладка: поставить бота рядом. Бот — полноценный Character с IsLocal=false,
+    /// то есть ровно тот случай, на котором ломается применение эффектов,
+    /// и его можно воспроизвести без второго игрока.
+    /// </summary>
+    private void DebugSpawnBot()
+    {
+        var sp = Object.FindFirstObjectByType<BotSpawner>();
+        var me = Character.localCharacter;
+        if (sp == null || me == null) { Log.LogWarning("[F11] BotSpawner или персонаж не найдены."); return; }
+        Vector3 where = me.Center + me.transform.forward * 3f;
+        sp.SpawnBot(where);
+        Log.LogWarning($"[F11] Бот заспавнен у {where}.");
     }
 
     /// <summary>ВРЕМЕННО: что из сетевого/ботов вообще доступно в текущей сцене.</summary>
