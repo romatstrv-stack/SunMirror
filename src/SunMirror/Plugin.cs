@@ -1,3 +1,4 @@
+﻿using System.Collections.Generic;
 ﻿using System.Collections;
 using System.IO;
 using System.Reflection;
@@ -96,6 +97,10 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _netSendEvery = null!;
     private ConfigEntry<bool> _flinch = null!;
     private ConfigEntry<bool> _debugKeys = null!;
+    private ConfigEntry<float> _signalGrow = null!;
+    private ConfigEntry<float> _signalMax = null!;
+    private ConfigEntry<float> _maxBlind = null!;
+    private ConfigEntry<float> _cooldown = null!;
     private ConfigEntry<float> _flinchForce = null!;
     private string _emoteState = "";
     private ConfigEntry<bool> _showModel = null!;
@@ -156,6 +161,10 @@ public partial class Plugin : BaseUnityPlugin
         _blindAfflictionSeconds = Config.Bind("Emote", "BlindAfflictionSeconds", 2.5f, "Мин. длительность нативного Affliction_Blind за одно обновление (сетевое, видно всем).");
         _netSendEvery = Config.Bind("Emote", "NetSendEverySeconds", 0.25f, "Как часто слать ослепление по сети, пока луч на цели (каждый кадр — флуд).");
         _flinch = Config.Bind("Emote", "VanillaFlinch", true, "Отдёргивание головы при попадании. Единственное, что физически чувствует игрок БЕЗ мода: сетевой метод самой игры.");
+        _signalGrow = Config.Bind("Spot", "SignalGrowPerMeter", 0.02f, "Насколько вспышка на зеркале растёт с каждым метром — чтобы её было видно издалека.");
+        _signalMax = Config.Bind("Spot", "SignalMaxSize", 3.5f, "Потолок размера вспышки. Без него на дальней дистанции зеркало заслоняет пол-экрана.");
+        _maxBlind = Config.Bind("Emote", "MaxBlindSeconds", 5f, "Потолок непрерывного ослепления. Дольше держать нельзя: иначе зеркалом можно просто выключить человека из игры.");
+        _cooldown = Config.Bind("Emote", "CooldownSeconds", 4f, "Пауза, в течение которой ту же цель ослепить нельзя. Защита от удержания в цикле.");
         _flinchForce = Config.Bind("Emote", "VanillaFlinchForce", 14f, "Сила отдёргивания головы. Больше 30 валит персонажа — нам нужно вздрагивание, а не нокдаун.");
         // Нативное ослепление игры рисует СВОЮ пелену на весь экран (IllegalScreenEffect, статус "BLIND").
         // Чужому игроку это и нужно — он без мода, иначе не почувствует ничего. А себе — нет:
@@ -481,7 +490,10 @@ public partial class Plugin : BaseUnityPlugin
         // сигнальный блик — ТОЛЬКО когда наводишь на тиммейта (он замечает тебя издалека)
         var me = Character.localCharacter;
         bool demo = Time.time < _selfDemoUntil && me != null;   // H-демо: вся визуалка на себе
-        bool flash = (active && _victim != null && me != null) || demo;
+        // Сигнальное зеркало: вспышка горит ВСЁ время, пока пускаешь зайчик, а не только
+        // когда луч уже зацепил игрока. Иначе тиммейт издалека не поймёт, что его зовут:
+        // чтобы вспышка появилась, надо было сначала попасть ему в глаза.
+        bool flash = (active && me != null && _spotHasPos) || demo;
         if (flash && me != null) { ShowSignal(me); if (demo) _lastLocalHitTime = Time.time; }
         else HideSignal();
         SetMirrorFlash(flash);   // само зеркало вспыхивает свечением (вспышка на поверхности)
@@ -1210,8 +1222,10 @@ public partial class Plugin : BaseUnityPlugin
     {
         EnsureSignal();
         var cam = Camera.main;
-        // блик прямо на зеркале (в отражении/для тиммейта — заметная вспышка на поверхности)
-        Vector3 pos = _held != null ? _held.transform.position : me.transform.position + Vector3.up * 1.7f;
+        // Вспышка висит на САМОМ диске. Раньше она привязывалась к старому пропу в руке;
+        // после его удаления якоря не стало, и вспышка уехала персонажу на голову.
+        Vector3 pos = _discMesh != null ? _discMesh.position
+                    : me.transform.position + Vector3.up * 1.4f;
         _signal!.transform.position = pos;
         // смотрит на того, в кого светишь (в демо/со стороны — на камеру, которой смотришь)
         Vector3 lookFrom = _victim != null ? _victim.transform.position
@@ -1219,7 +1233,11 @@ public partial class Plugin : BaseUnityPlugin
             : (cam != null ? cam.transform.position : pos - Vector3.forward));
         _signal.transform.rotation = Quaternion.LookRotation(pos - lookFrom);
         float pulse = 0.7f + 0.3f * Mathf.Sin(Time.time * 12f);
-        _signal.transform.localScale = Vector3.one * (0.6f * pulse);
+        // Растём с расстоянием до смотрящего: зеркало должно быть заметно и за сто метров,
+        // иначе на таком удалении вспышка превращается в один пиксель.
+        float dist = Vector3.Distance(pos, lookFrom);
+        float size = Mathf.Clamp(0.6f + dist * _signalGrow.Value, 0.6f, _signalMax.Value);
+        _signal.transform.localScale = Vector3.one * (size * pulse);
         if (_signalLight != null) _signalLight.intensity = 12f * pulse;
         if (!_signal.activeSelf) _signal.SetActive(true);
     }
@@ -1662,6 +1680,8 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _poseFreezeDelay = null!;
     private ConfigEntry<float> _blindHoldSeconds = null!;
     private float _moveModPrev = 1f;
+    private float _blindBeganAt;                                   // начало НЕПРЕРЫВНОГО ослепления
+    private readonly Dictionary<int, float> _cooldownUntil = new();  // ключ — ViewID цели
     private CharacterMovement? _blindMv;
 
     /// <summary>
@@ -1789,7 +1809,24 @@ public partial class Plugin : BaseUnityPlugin
     private void StartOrRefreshBlind(Character victim, float linger)
     {
         if (!_blindOn.Value || victim == null) return;
-        if (_blindVictim != victim) { RestoreBlind(); BeginBlind(victim); }
+
+        // ЗАЩИТА ОТ УДЕРЖАНИЯ. Проверяем здесь, а не у стрелка: этот код выполняется
+        // и на клиенте самой жертвы, поэтому её нельзя держать ослеплённой, что бы
+        // ей ни присылали. Иначе зеркалом можно просто выключить человека из игры.
+        int key = VictimKey(victim);
+        if (_cooldownUntil.TryGetValue(key, out float until) && Time.time < until) return;
+
+        if (_blindVictim == victim && _maxBlind.Value > 0f &&
+            Time.time - _blindBeganAt >= _maxBlind.Value)
+        {
+            _cooldownUntil[key] = Time.time + Mathf.Max(0f, _cooldown.Value);
+            Log.LogInfo($"Ослепление прервано по потолку {_maxBlind.Value:0.0} с; " +
+                        $"повтор по этой цели не раньше чем через {_cooldown.Value:0.0} с.");
+            RestoreBlind();
+            return;
+        }
+
+        if (_blindVictim != victim) { RestoreBlind(); BeginBlind(victim); _blindBeganAt = Time.time; }
         _blindUntil = Time.time + linger;
 
         // Настоящее сетевое ослепление (видно всем, не только держателю зеркала).
@@ -1803,6 +1840,13 @@ public partial class Plugin : BaseUnityPlugin
             catch (System.Exception e) { Log.LogWarning($"AddAffliction(Blind) failed: {e.Message}"); }
         }
         else if (self) ClearNativeBlind(victim);   // страховка: вдруг осталось с прошлого раза
+    }
+
+    /// <summary>Ключ цели для кулдауна: ViewID, если персонаж сетевой, иначе id объекта.</summary>
+    private static int VictimKey(Character c)
+    {
+        var v = c.photonView;
+        return v != null && v.ViewID != 0 ? v.ViewID : c.GetInstanceID();
     }
 
     private void BeginBlind(Character victim)
@@ -1957,6 +2001,18 @@ public partial class Plugin : BaseUnityPlugin
         _lockLook = false;                                                            // вернуть управление взглядом
         if (_blindMv != null) _blindMv.movementModifier = _moveModPrev;   // ОБЯЗАТЕЛЬНО вернуть движение
         Log.LogInfo($"Blind RESTORE (эффект снят) moveModRestored={_moveModPrev} rigAiming={_rigAiming}");
+        // Небольшая пауза после КАЖДОГО снятия: без неё луч, сошедший с глаз на долю
+        // секунды, тут же начинает новое ослепление, и получается то же удержание.
+        if (_cooldown.Value > 0f)
+        {
+            // ВАЖНО: не затирать длинную паузу, поставленную при обрыве по потолку.
+            // Из-за этого ослепление заходило по новой сразу после обрыва, и защита
+            // превращалась в мигание «ослепил — отпустил — ослепил».
+            int ck = VictimKey(_blindVictim);
+            float shortUntil = Time.time + _cooldown.Value * 0.5f;
+            if (!_cooldownUntil.TryGetValue(ck, out float cur) || cur < shortUntil)
+                _cooldownUntil[ck] = shortUntil;
+        }
         _blindVictim = null;
         _blindMv = null;
     }
