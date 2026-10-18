@@ -17,7 +17,7 @@
     <IsThunderstorePackable>true</IsThunderstorePackable>
     <!-- Package name on Thunderstore. Must not contain spaces ' ' or dashes '-'. -->
     <ThunderstoreName>SunMirror</ThunderstoreName>
-    <ThunderstoreDescription>Catch the sun with a hand-mirror and zap a teammate with a blinding sunbeam - they faceplant. A friendly banana-peel prank. Only you need the mod; victims (even vanilla) still get knocked down. G = hold, F = zap.</ThunderstoreDescription>
+    <ThunderstoreDescription>Catch the sun with a frisbee-mirror and blind a teammate: they cover their face, freeze with spiral eyes, and can't move until you look away. A friendly banana-peel prank - nobody falls, nobody dies.</ThunderstoreDescription>
     <!--
       Communities and package categories metadata for publishing with ThunderPipe.
       Communities: https://thunderstore.io/api/experimental/community/
@@ -35,7 +35,6 @@
     <!-- TargetPath is the dll file produced during build. -->
     <ModFile Include="$(TargetPath)" Destination="plugins/" />
     <!-- Модель зеркала, грузится в рантайме рядом с dll. -->
-    <ModFile Include="Assets/mirror.glb" Destination="plugins/" />
     <!--
       If your project needs additional files, e.g. asset bundles,
       you can add them here. Example:

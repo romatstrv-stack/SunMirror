@@ -94,6 +94,9 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<string> _blindMouth = null!;
     private ConfigEntry<float> _poseFreezeAt = null!;
     private ConfigEntry<float> _netSendEvery = null!;
+    private ConfigEntry<bool> _flinch = null!;
+    private ConfigEntry<bool> _debugKeys = null!;
+    private ConfigEntry<float> _flinchForce = null!;
     private string _emoteState = "";
     private ConfigEntry<bool> _showModel = null!;
     private ConfigEntry<float> _targetSize = null!, _heldScale = null!;
@@ -147,10 +150,13 @@ public partial class Plugin : BaseUnityPlugin
         _blindHoldSeconds = Config.Bind("Emote", "BlindHoldSeconds", 6f, "Сколько держится ослепление после попадания зайчика в глаза.");
         _poseFreezeDelay = Config.Bind("Emote", "PoseFreezeDelay", 0.55f, "Через сколько секунд после начала эмоута заморозить позу (руки у глаз).");
         _rigAimTime    = Config.Bind("Debug", "RigAimSeconds", 1.0f, "Сколько зеркало-стенд наводит зайчика до ослепления.");
+        _debugKeys = Config.Bind("Debug", "DebugKeys", true, "Отладочные клавиши (B K L J C H U N P M O F8-F11 и подстройка наклона). Перед релизом false.");
         _selfTarget    = Config.Bind("Debug", "SelfTarget", false, "Луч всегда бьёт в тебя — тест эффекта без второго игрока (клавиша J).");
         _blindOn       = Config.Bind("Emote", "BlindStars", true, "Ослепление со звёздочками над головой (Affliction_Blind).");
         _blindAfflictionSeconds = Config.Bind("Emote", "BlindAfflictionSeconds", 2.5f, "Мин. длительность нативного Affliction_Blind за одно обновление (сетевое, видно всем).");
         _netSendEvery = Config.Bind("Emote", "NetSendEverySeconds", 0.25f, "Как часто слать ослепление по сети, пока луч на цели (каждый кадр — флуд).");
+        _flinch = Config.Bind("Emote", "VanillaFlinch", true, "Отдёргивание головы при попадании. Единственное, что физически чувствует игрок БЕЗ мода: сетевой метод самой игры.");
+        _flinchForce = Config.Bind("Emote", "VanillaFlinchForce", 14f, "Сила отдёргивания головы. Больше 30 валит персонажа — нам нужно вздрагивание, а не нокдаун.");
         // Нативное ослепление игры рисует СВОЮ пелену на весь экран (IllegalScreenEffect, статус "BLIND").
         // Чужому игроку это и нужно — он без мода, иначе не почувствует ничего. А себе — нет:
         // именно эта пелена и была «туманом», который не снимался ни слоями [O], ни клавишей U.
@@ -259,64 +265,10 @@ public partial class Plugin : BaseUnityPlugin
     {
         var kb = Keyboard.current;
         if (kb == null) return;
-        if (kb[_equipKey.Value].wasPressedThisFrame) ToggleEquip();
-        if (kb[_selfTestKey.Value].wasPressedThisFrame) SelfRagdollTest();
-        if (kb[_thirdPersonKey.Value].wasPressedThisFrame) ToggleThirdPerson();
-        if (kb[_giveKey.Value].wasPressedThisFrame) GiveBinoculars();
-        if (kb[Key.N].wasPressedThisFrame) { ScanShinyMaterials(); DumpMouths(); _emotesLogged = false; LogEmotesOnce(); ProbeNetwork(); }
-        // (LogGuidebookOnce убран: он сканировал сцену КАЖДЫЙ кадр и никогда не находил
-        //  руководство после перехода на тарелочку — это и были лаги.)
-        if (kb[Key.U].wasPressedThisFrame) EmergencyUnstick();   // застрял (старый баг) — отлипнуть
-        if (kb[Key.P].wasPressedThisFrame) DebugBoardFlight();  // сразу вылететь на остров (отладка)
-        if (kb[Key.M].wasPressedThisFrame) DebugNoon();
-        if (kb[Key.F11].wasPressedThisFrame) DebugSpawnBot();  // бот рядом — цель для теста сети         // перевести время на полдень (отладка)
-        // Живая подстройка кадра позы: F9 раньше, F10 позже.
-        // Config.Save() обязателен — иначе значение потеряется при следующей пересборке.
-        bool poseMinus = kb[Key.F9].wasPressedThisFrame;
-        bool posePlus  = kb[Key.F10].wasPressedThisFrame;
-        if (poseMinus || posePlus)
-        {
-            _poseFreezeAt.Value = Mathf.Clamp01(_poseFreezeAt.Value + (posePlus ? 0.05f : -0.05f));
-            Config.Save();
-            Log.LogWarning($"PoseFreezeAt = {_poseFreezeAt.Value:0.00} (кадр клипа эмоута)");
-        }
-        // O — поочерёдно отключаем слои, чтобы НАЙТИ источник засветки, а не гадать.
-        if (kb[Key.O].wasPressedThisFrame || kb[Key.F8].wasPressedThisFrame || kb[Key.Numpad0].wasPressedThisFrame || kb[Key.Digit0].wasPressedThisFrame)
-        {
-            _debugLayer = (_debugLayer + 1) % 5;
-            string[] names = { "все слои включены", "БЕЗ экранной звезды", "БЕЗ блика на зеркале",
-                               "БЕЗ прожектора", "ВСЕ мои эффекты выключены" };
-            Log.LogWarning($"[O] Режим {_debugLayer}: {names[_debugLayer]}");
-            if (_debugLayer >= 3) HideSpot();
-        }
-
-        if (kb[Key.K].wasPressedThisFrame) ToggleTestRig();   // K — поставить/убрать зеркало
-        if (kb[Key.L].wasPressedThisFrame)                    // L — зеркало начинает ловить зайчика
-        {
-            _rigAiming = !_rigAiming; _rigAim = 0f;
-            if (!_rigAiming) RestoreBlind();
-            Log.LogInfo($"Стенд наводит зайчика: {_rigAiming}");
-        }
+        // Вся отладка — за одним выключателем. Перед релизом Debug/DebugKeys = false,
+        // и мод остаётся только с игровым поведением: подобрал тарелочку, жмёшь ЛКМ.
+        if (_debugKeys.Value) HandleDebugKeys(kb);
         UpdateTestRig();
-        if (kb[Key.J].wasPressedThisFrame)
-        {
-            _selfTarget.Value = !_selfTarget.Value; Config.Save();
-            Log.LogInfo($"SelfTarget = {_selfTarget.Value} (луч бьёт в себя — тест без второго игрока)");
-        }
-
-        // живая подстройка посадки хвата (без пересборки): PageUp/PageDown — выше/ниже, Home/End — ближе/дальше
-        // Тарелочку держат низко, регулировка высоты не нужна — клавиши отданы под НАКЛОН диска.
-        // Config.Save() обязателен: каждая пересборка перезагружает плагин, и он перечитывает
-        // конфиг с диска — без сохранения подстройка терялась при следующем билде.
-        // Клавиш-дублей несколько: у тебя не срабатывали и PageUp/PageDown, и скобки.
-        bool tiltMinus = kb[Key.LeftBracket].wasPressedThisFrame  || kb[Key.Minus].wasPressedThisFrame  || kb[Key.Numpad4].wasPressedThisFrame;
-        bool tiltPlus  = kb[Key.RightBracket].wasPressedThisFrame || kb[Key.Equals].wasPressedThisFrame || kb[Key.Numpad6].wasPressedThisFrame;
-        if (tiltMinus || tiltPlus)
-        {
-            _discTilt.Value += tiltPlus ? 5f : -5f;
-            Config.Save();
-            Log.LogInfo($"DiscTilt = {_discTilt.Value:0}");
-        }
         UpdateReflectionProbe();
         UpdateRealMirror();
         ApplyDiscTilt();   // применяем и здесь тоже: прослойка наша, перезаписывать её нечему
@@ -412,6 +364,66 @@ public partial class Plugin : BaseUnityPlugin
         tex.wrapMode = TextureWrapMode.Clamp;
         tex.filterMode = FilterMode.Bilinear;
         _flareTex = tex; return tex;
+    }
+
+    private void HandleDebugKeys(Keyboard kb)
+    {
+        if (kb[_selfTestKey.Value].wasPressedThisFrame) SelfRagdollTest();
+        if (kb[_thirdPersonKey.Value].wasPressedThisFrame) ToggleThirdPerson();
+        if (kb[_giveKey.Value].wasPressedThisFrame) GiveBinoculars();
+        if (kb[Key.N].wasPressedThisFrame) { ScanShinyMaterials(); DumpMouths(); _emotesLogged = false; LogEmotesOnce(); ProbeNetwork(); }
+        // (LogGuidebookOnce убран: он сканировал сцену КАЖДЫЙ кадр и никогда не находил
+        //  руководство после перехода на тарелочку — это и были лаги.)
+        if (kb[Key.U].wasPressedThisFrame) EmergencyUnstick();   // застрял (старый баг) — отлипнуть
+        if (kb[Key.P].wasPressedThisFrame) DebugBoardFlight();  // сразу вылететь на остров (отладка)
+        if (kb[Key.M].wasPressedThisFrame) DebugNoon();
+        if (kb[Key.F11].wasPressedThisFrame) DebugSpawnBot();  // бот рядом — цель для теста сети         // перевести время на полдень (отладка)
+        // Живая подстройка кадра позы: F9 раньше, F10 позже.
+        // Config.Save() обязателен — иначе значение потеряется при следующей пересборке.
+        bool poseMinus = kb[Key.F9].wasPressedThisFrame;
+        bool posePlus  = kb[Key.F10].wasPressedThisFrame;
+        if (poseMinus || posePlus)
+        {
+            _poseFreezeAt.Value = Mathf.Clamp01(_poseFreezeAt.Value + (posePlus ? 0.05f : -0.05f));
+            Config.Save();
+            Log.LogWarning($"PoseFreezeAt = {_poseFreezeAt.Value:0.00} (кадр клипа эмоута)");
+        }
+        // O — поочерёдно отключаем слои, чтобы НАЙТИ источник засветки, а не гадать.
+        if (kb[Key.O].wasPressedThisFrame || kb[Key.F8].wasPressedThisFrame || kb[Key.Numpad0].wasPressedThisFrame || kb[Key.Digit0].wasPressedThisFrame)
+        {
+            _debugLayer = (_debugLayer + 1) % 5;
+            string[] names = { "все слои включены", "БЕЗ экранной звезды", "БЕЗ блика на зеркале",
+                               "БЕЗ прожектора", "ВСЕ мои эффекты выключены" };
+            Log.LogWarning($"[O] Режим {_debugLayer}: {names[_debugLayer]}");
+            if (_debugLayer >= 3) HideSpot();
+        }
+
+        if (kb[Key.K].wasPressedThisFrame) ToggleTestRig();   // K — поставить/убрать зеркало
+        if (kb[Key.L].wasPressedThisFrame)                    // L — зеркало начинает ловить зайчика
+        {
+            _rigAiming = !_rigAiming; _rigAim = 0f;
+            if (!_rigAiming) RestoreBlind();
+            Log.LogInfo($"Стенд наводит зайчика: {_rigAiming}");
+        }
+        if (kb[Key.J].wasPressedThisFrame)
+        {
+            _selfTarget.Value = !_selfTarget.Value; Config.Save();
+            Log.LogInfo($"SelfTarget = {_selfTarget.Value} (луч бьёт в себя — тест без второго игрока)");
+        }
+
+        // живая подстройка посадки хвата (без пересборки): PageUp/PageDown — выше/ниже, Home/End — ближе/дальше
+        // Тарелочку держат низко, регулировка высоты не нужна — клавиши отданы под НАКЛОН диска.
+        // Config.Save() обязателен: каждая пересборка перезагружает плагин, и он перечитывает
+        // конфиг с диска — без сохранения подстройка терялась при следующем билде.
+        // Клавиш-дублей несколько: у тебя не срабатывали и PageUp/PageDown, и скобки.
+        bool tiltMinus = kb[Key.LeftBracket].wasPressedThisFrame  || kb[Key.Minus].wasPressedThisFrame  || kb[Key.Numpad4].wasPressedThisFrame;
+        bool tiltPlus  = kb[Key.RightBracket].wasPressedThisFrame || kb[Key.Equals].wasPressedThisFrame || kb[Key.Numpad6].wasPressedThisFrame;
+        if (tiltMinus || tiltPlus)
+        {
+            _discTilt.Value += tiltPlus ? 5f : -5f;
+            Config.Save();
+            Log.LogInfo($"DiscTilt = {_discTilt.Value:0}");
+        }
     }
 
     private void OnGUI()
@@ -1005,61 +1017,6 @@ public partial class Plugin : BaseUnityPlugin
         mesh.SetParent(pivot, true);      // диск переезжает внутрь, сохраняя вид
         Log.LogInfo($"Tilt pivot вставлен над '{mesh.name}'.");
         return pivot;
-    }
-
-    // === Старый путь (бинокль + модель mirror.glb) — оставлен на случай отката ===
-    private void ReskinBinocularTransform(Transform root, string tag)
-    {
-        if (root == null) return;
-        var mirrorRoot = root.Find("SunMirrorReskin");
-
-        // прячем корпус бинокля; руки Hand_*, дым и НАШУ модель не трогаем. Делаем каждый раз.
-        // заодно запоминаем локальную позицию корпуса — посадим зеркало туда (чтобы руки держали).
-        Vector3 bodyLocalPos = Vector3.zero;
-        foreach (var r in root.GetComponentsInChildren<Renderer>(true))
-        {
-            if (r == null) continue;
-            if (mirrorRoot != null && r.transform.IsChildOf(mirrorRoot)) continue; // не прячем зеркало
-            if (r.name.ToLowerInvariant().Contains("glint")) continue;             // не прячем блик
-            if (r.name.ToLowerInvariant().Contains("hand")) continue;              // руки не трогаем
-            if (r is ParticleSystemRenderer) continue;                             // дым не трогаем
-            if (r.name.ToLowerInvariant() == "binoculars")
-                bodyLocalPos = root.InverseTransformPoint(r.transform.position);   // где был корпус
-            r.enabled = false;
-            r.forceRenderingOff = true;
-        }
-
-        if (!_showModel.Value) return;
-        if (mirrorRoot != null) { mirrorRoot.gameObject.SetActive(true); return; } // уже есть — просто показать
-
-        var proto = GetMirrorPrototype();
-        if (proto == null) { Log.LogWarning("Reskin: proto == null"); return; }
-
-        var model = Object.Instantiate(proto);
-        model.name = "SunMirrorReskin";
-        model.SetActive(true);
-        foreach (var tr in model.GetComponentsInChildren<Transform>(true))
-            tr.gameObject.layer = MirrorLayer;      // чтобы зайчик не подсвечивал зеркало
-        var t = model.transform;
-        t.SetParent(root, false);
-        t.localPosition = bodyLocalPos + new Vector3(_rOffX.Value, _rOffY.Value, _rOffZ.Value);
-        t.localRotation = Quaternion.Euler(_rPitch.Value, _rYaw.Value, _rRoll.Value);
-        Vector3 pls = root.lossyScale;
-        Vector3 baseScale = proto.transform.localScale * (_reskinScale.Value / Mathf.Max(1e-4f, _targetSize.Value));
-        t.localScale = new Vector3(
-            baseScale.x / Mathf.Max(1e-4f, Mathf.Abs(pls.x)),
-            baseScale.y / Mathf.Max(1e-4f, Mathf.Abs(pls.y)),
-            baseScale.z / Mathf.Max(1e-4f, Mathf.Abs(pls.z)));
-
-        // материалы модели — чтобы поверхность зеркала вспыхивала при наводке на тиммейта
-        var mats = new System.Collections.Generic.List<Material>();
-        foreach (var mr in model.GetComponentsInChildren<MeshRenderer>())
-            if (mr.sharedMaterial != null) mats.Add(mr.sharedMaterial);
-        _heldMats = mats.ToArray();
-
-        AddGlint(model.transform);   // блик по центру зеркала (билборд к камере)
-
-        Log.LogInfo($"Reskinned {tag} worldScale={t.lossyScale} pos={t.position} mats={_heldMats.Length}");
     }
 
     // Блик на поверхности зеркала: квад с текстурой lens-flare по центру диска, лицом к камере.
@@ -1707,9 +1664,34 @@ public partial class Plugin : BaseUnityPlugin
     private float _moveModPrev = 1f;
     private CharacterMovement? _blindMv;
 
+    /// <summary>
+    /// Коротко отдёргивает голову жертвы назад — как от света в глаза.
+    /// Character.AddForceToBodyPart сам рассылает RPCA_AddForceToBodyPart всем клиентам,
+    /// поэтому это работает и на игроке БЕЗ мода — в отличие от глаз, рта и обездвиживания.
+    /// Толкаем ТОЛЬКО голову (wholeBodyForce = ноль), иначе персонаж улетит.
+    /// </summary>
+    private void FlinchHead(Character victim)
+    {
+        if (!_flinch.Value || victim == null) return;
+        try
+        {
+            var rig = victim.GetBodypartRig(BodypartType.Head);
+            if (rig == null) return;
+            // Направление — от того, кто светит, к жертве, плюс немного вверх:
+            // голова запрокидывается, а не вдавливается в плечи.
+            var me = Character.localCharacter;
+            Vector3 dir = me != null ? (victim.Center - me.Center) : Vector3.forward;
+            dir.y = 0f;
+            dir = (dir.sqrMagnitude > 1e-4f ? dir.normalized : Vector3.forward) + Vector3.up * 0.6f;
+            victim.AddForceToBodyPart(rig, dir.normalized * _flinchForce.Value, Vector3.zero);
+        }
+        catch (System.Exception e) { Log.LogWarning($"FlinchHead: {e.Message}"); }
+    }
+
     // ───────────────────────── сетевой слой ─────────────────────────
 
     private float _netTick, _netSendAt;
+    private Character? _lastNetLogged;
 
     /// <summary>
     /// Вешает приёмник RPC на каждого персонажа в сцене. Нужен на ВСЕХ, а не только
@@ -1764,7 +1746,11 @@ public partial class Plugin : BaseUnityPlugin
         if (victim.GetComponent<SunMirrorNet>() == null)
             Log.LogWarning($"[SEND] на '{victim.name}' нет приёмника SunMirrorNet — RPC не найдёт метод.");
 
-        Log.LogWarning($"[SEND] RPC -> '{victim.name}' viewID={view.ViewID} сек={seconds:0.0} от {shooter}");
+        if (victim != _lastNetLogged)
+        {
+            _lastNetLogged = victim;
+            Log.LogInfo($"[SEND] RPC -> '{victim.name}' viewID={view.ViewID} от {shooter}");
+        }
         try { view.RPC(SunMirrorNet.RpcName, RpcTarget.All, seconds, shooter); }
         catch (System.Exception e)
         {
@@ -1875,6 +1861,8 @@ public partial class Plugin : BaseUnityPlugin
             _blindMv = victim.GetComponentInChildren<CharacterMovement>();
             if (_blindMv != null) _moveModPrev = _blindMv.movementModifier;
         }
+
+        FlinchHead(victim);
 
         Log.LogInfo($"Blind begin on {victim.name} moveModPrev={_moveModPrev}");
     }
@@ -2103,62 +2091,6 @@ public partial class Plugin : BaseUnityPlugin
         catch (System.Exception ex) { Log.LogWarning($"Emote listing failed: {ex.Message}"); }
     }
 
-    private GameObject? GetMirrorPrototype()
-    {
-        if (_mirrorPrototype != null) return _mirrorPrototype;
-        if (_triedLoad) return null;
-        _triedLoad = true;
-
-        string dir = Path.GetDirectoryName(Info.Location) ?? Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
-        string path = Path.Combine(dir, "mirror.glb");
-        if (!File.Exists(path)) { Log.LogError($"mirror.glb not found: {path}"); return null; }
-
-        var root = GlbLoader.Load(File.ReadAllBytes(path), "SunMirrorModel");
-        if (root == null) return null;
-
-        RecenterAndScale(root, _targetSize.Value);
-        TuneMirrorMaterial(root);
-        root.SetActive(false);
-        Object.DontDestroyOnLoad(root);
-        _mirrorPrototype = root;
-        return root;
-    }
-
-    // ── взять/убрать зеркало ──
-    private void ToggleEquip()
-    {
-        if (_held != null) { Object.Destroy(_held); _held = null; _heldMats = null; Log.LogInfo("Mirror unequipped."); return; }
-
-        var me = Character.localCharacter;
-        if (me == null) { Log.LogInfo("Can't equip: no local character."); return; }
-        LogEmotesOnce();
-        LogHandBonesOnce(me);
-        if (!_showModel.Value) { _held = new GameObject("MirrorMarker"); Log.LogInfo("Equipped (model hidden)."); return; }
-
-        var proto = GetMirrorPrototype();
-        if (proto == null) { _held = new GameObject("MirrorMarker"); return; }
-
-        var anchor = GetHandAnchor(me);
-        _held = Object.Instantiate(proto);
-        _held.SetActive(true);
-        _held.transform.SetParent(anchor, false);
-        _held.transform.localPosition = new Vector3(_offX.Value, _offY.Value, _offZ.Value);
-        _held.transform.localRotation = Quaternion.Euler(_pitch.Value, _yaw.Value, _roll.Value);
-        Vector3 pls = anchor.lossyScale;
-        Vector3 baseScale = proto.transform.localScale * _heldScale.Value;
-        _held.transform.localScale = new Vector3(
-            baseScale.x / Mathf.Max(1e-4f, Mathf.Abs(pls.x)),
-            baseScale.y / Mathf.Max(1e-4f, Mathf.Abs(pls.y)),
-            baseScale.z / Mathf.Max(1e-4f, Mathf.Abs(pls.z)));
-
-        var mats = new System.Collections.Generic.List<Material>();
-        foreach (var mr in _held.GetComponentsInChildren<MeshRenderer>())
-            if (mr.sharedMaterial != null) mats.Add(mr.sharedMaterial);
-        _heldMats = mats.ToArray();
-
-        Log.LogInfo($"Mirror equipped on '{anchor.name}' mats={_heldMats.Length} mirrorPos={_held.transform.position} worldScale={_held.transform.lossyScale}.");
-    }
-
     // Реальная кость кисти (Hand_R) — всегда в руке, движется с персонажем.
     private static Transform GetHandAnchor(Character me)
     {
@@ -2184,23 +2116,6 @@ public partial class Plugin : BaseUnityPlugin
             else if (n.Contains("_l") || n.Contains(".l") || n.Contains("left")) left ??= t;
         }
         return right ?? left ?? any;
-    }
-
-    private void LogHandBonesOnce(Character me)
-    {
-        if (_bonesLogged) return;
-        _bonesLogged = true;
-        try
-        {
-            Log.LogInfo("=== hand-bone candidates ===");
-            foreach (var t in me.GetComponentsInChildren<Transform>())
-            {
-                string n = t.name.ToLowerInvariant();
-                if (n.Contains("hand") || n.Contains("wrist") || n.Contains("palm") || n.Contains("arm"))
-                    Log.LogInfo($"  bone '{t.name}' pos={t.position}");
-            }
-        }
-        catch (System.Exception e) { Log.LogWarning($"LogHandBones failed: {e.Message}"); }
     }
 
     private static void RecenterAndScale(GameObject root, float targetSize)

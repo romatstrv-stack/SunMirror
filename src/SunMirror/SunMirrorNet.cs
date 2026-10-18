@@ -33,9 +33,6 @@ internal sealed class SunMirrorNet : MonoBehaviour
         if (Plugin.Instance == null) return;
         var victim = GetComponent<Character>();
         if (victim == null) return;
-        Plugin.Log.LogWarning($"[RPC] получено ослепление: цель='{victim.name}' " +
-                              $"локальная={victim.IsLocal} бот={victim.isBot} " +
-                              $"сек={seconds:0.0} от viewID={shooterViewID}");
         Plugin.Instance.ApplyNetworkBlind(victim, seconds, shooterViewID);
     }
 }
