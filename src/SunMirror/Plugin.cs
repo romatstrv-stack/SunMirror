@@ -1224,13 +1224,22 @@ public partial class Plugin : BaseUnityPlugin
         var cam = Camera.main;
         // Вспышка висит на САМОМ диске. Раньше она привязывалась к старому пропу в руке;
         // после его удаления якоря не стало, и вспышка уехала персонажу на голову.
+        // ОГРАНИЧЕНИЕ: _discMesh — это viewmodel-клон, он живёт у камеры от первого лица.
+        // По замерам вспышка оказывается метрах в шести от персонажа, в воздухе, а не
+        // в его руках. Для СВОЕГО экрана это нормально, но как сигнал для других —
+        // неверно: тиммейт увидит светяшку рядом с тобой, а не на твоём зеркале.
+        // Правильный якорь — настоящий предмет в руках, который рисуют все клиенты.
         Vector3 pos = _discMesh != null ? _discMesh.position
                     : me.transform.position + Vector3.up * 1.4f;
         _signal!.transform.position = pos;
-        // смотрит на того, в кого светишь (в демо/со стороны — на камеру, которой смотришь)
-        Vector3 lookFrom = _victim != null ? _victim.transform.position
-            : (_tpActive && _tpCam != null ? _tpCam.transform.position
-            : (cam != null ? cam.transform.position : pos - Vector3.forward));
+        // Разворачиваем вспышку на ТОГО, КТО СМОТРИТ, а не на цель луча.
+        // У каждого клиента это его собственная камера — так зеркало «мигает» каждому,
+        // кто на тебя смотрит, как настоящее сигнальное. Раньше тут стояла позиция жертвы:
+        // при включённом SelfTarget вспышка разворачивалась на собственные ноги игрока
+        // и с десятка метров была видна с ребра, то есть почти никак.
+        var viewer = ActiveCamera();
+        Vector3 lookFrom = viewer != null ? viewer.transform.position
+            : (cam != null ? cam.transform.position : pos - Vector3.forward);
         _signal.transform.rotation = Quaternion.LookRotation(pos - lookFrom);
         float pulse = 0.7f + 0.3f * Mathf.Sin(Time.time * 12f);
         // Растём с расстоянием до смотрящего: зеркало должно быть заметно и за сто метров,
@@ -1240,6 +1249,7 @@ public partial class Plugin : BaseUnityPlugin
         _signal.transform.localScale = Vector3.one * (size * pulse);
         if (_signalLight != null) _signalLight.intensity = 12f * pulse;
         if (!_signal.activeSelf) _signal.SetActive(true);
+
     }
 
     private void HideSignal() { if (_signal != null && _signal.activeSelf) _signal.SetActive(false); }
