@@ -243,6 +243,12 @@ public partial class Plugin : BaseUnityPlugin
                 }
                 Object.Destroy(t.gameObject);
             }
+            // Наши компоненты висят на ЧУЖИХ объектах — на персонажах и ботах, —
+            // поэтому уборка по имени объекта их не ловит. Ищем ПО ИМЕНИ ТИПА:
+            // после горячей перезагрузки старый компонент относится к другой сборке,
+            // и обычный GetComponent<T>() его уже не находит.
+            DestroyOurComponents();
+
             _reskins.Clear();
             _mirroredCovers.Clear();
 
@@ -1755,6 +1761,33 @@ public partial class Plugin : BaseUnityPlugin
     /// на нас: Photon вызывает метод на объекте жертвы, и объект этот есть у каждого клиента.
     /// Character.AllCharacters — статический список самой игры, перебор дешёвый.
     /// </summary>
+    private static readonly string[] OurComponentTypes = { "SunMirrorNet", "SunMirrorDummy" };
+
+    /// <summary>
+    /// Снимает наши компоненты с чужих объектов. Сравниваем ИМЯ типа, а не сам тип:
+    /// после hot-reload компонент от прошлой сборки — формально другой тип, и
+    /// GetComponent&lt;T&gt;() его не видит. Из-за этого они копились на персонажах,
+    /// а RPC вызывался столько раз, сколько накопилось обработчиков.
+    /// </summary>
+    private static void DestroyOurComponents()
+    {
+        foreach (var mb in Object.FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (mb == null) continue;
+            string n = mb.GetType().Name;
+            for (int i = 0; i < OurComponentTypes.Length; i++)
+                if (n == OurComponentTypes[i]) { Object.Destroy(mb); break; }
+        }
+    }
+
+    /// <summary>Есть ли уже наш компонент с таким именем типа (в т.ч. от прошлой сборки).</summary>
+    private static bool HasOurComponent(GameObject go, string typeName)
+    {
+        foreach (var mb in go.GetComponents<MonoBehaviour>())
+            if (mb != null && mb.GetType().Name == typeName) return true;
+        return false;
+    }
+
     private void EnsureNetReceivers()
     {
         _netTick -= Time.deltaTime;
@@ -1763,7 +1796,7 @@ public partial class Plugin : BaseUnityPlugin
 
         foreach (var c in Character.AllCharacters)
         {
-            if (c == null || c.GetComponent<SunMirrorNet>() != null) continue;
+            if (c == null || HasOurComponent(c.gameObject, "SunMirrorNet")) continue;
             c.gameObject.AddComponent<SunMirrorNet>();
             // Без этого Photon ищет метод в списке компонентов, собранном ДО нас.
             try { c.photonView?.RefreshRpcMonoBehaviourCache(); }
@@ -2173,7 +2206,7 @@ public partial class Plugin : BaseUnityPlugin
             found.transform.rotation = Quaternion.LookRotation(dir.normalized);
             // Одного разворота мало: ИИ бота вернёт его обратно через кадр.
             // Вешаем компонент, который держит его неподвижным и лицом к игроку.
-            if (found.GetComponent<SunMirrorDummy>() == null)
+            if (!HasOurComponent(found.gameObject, "SunMirrorDummy"))
                 found.gameObject.AddComponent<SunMirrorDummy>();
             Log.LogWarning($"[F11] Болванчик '{found.name}' поставлен лицом к игроку (попытка {attempt + 1}).");
             yield break;
@@ -2195,6 +2228,19 @@ public partial class Plugin : BaseUnityPlugin
         Log.LogWarning($"[NET] PhotonNetwork: InRoom={PhotonNetwork.InRoom} " +
                        $"IsMaster={PhotonNetwork.IsMasterClient} Offline={PhotonNetwork.OfflineMode} " +
                        $"игроков={(PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.PlayerCount : 0)}");
+
+        // Сколько наших компонентов реально висит в сцене: после hot-reload старые
+        // не снимались и копились, а RPC вызывался столько раз, сколько их накопилось.
+        int net = 0, dummy = 0;
+        foreach (var mb in Object.FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (mb == null) continue;
+            string n = mb.GetType().Name;
+            if (n == "SunMirrorNet") net++;
+            else if (n == "SunMirrorDummy") dummy++;
+        }
+        Log.LogWarning($"[NET] наших компонентов в сцене: SunMirrorNet={net}, SunMirrorDummy={dummy} " +
+                       $"(персонажей {Character.AllCharacters.Count} — больше одного на персонажа это мусор)");
     }
 
     /// <summary>Печатает список доступных ртов — чтобы вписать нужный в конфиг BlindMouthName.</summary>
