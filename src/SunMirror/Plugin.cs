@@ -278,8 +278,16 @@ public partial class Plugin : BaseUnityPlugin
         catch (System.Exception e) { Log.LogWarning($"OnDestroy: {e.GetType().Name}: {e.Message}"); }
     }
 
+    private float _fpsAccum; private int _fpsFrames; private float _selfMs;
+
     private void Update()
     {
+        // Замер: средний кадр и сколько в нём занимает НАША работа.
+        // Лаги были сквозной темой проекта, а числа до сих пор ни одного.
+        bool measure = _debugKeys.Value;
+        long t0 = 0;
+        if (measure) { _fpsAccum += Time.unscaledDeltaTime; _fpsFrames++; t0 = System.Diagnostics.Stopwatch.GetTimestamp(); }
+
         var kb = Keyboard.current;
         if (kb == null) return;
         // Вся отладка — за одним выключателем. Перед релизом Debug/DebugKeys = false,
@@ -301,6 +309,10 @@ public partial class Plugin : BaseUnityPlugin
             ? Mathf.Clamp01(_glareStrength.Value) * viewNow
             : 0f;
         _glareAlpha = Mathf.MoveTowards(_glareAlpha, target, Time.deltaTime * (target > _glareAlpha ? 9f : 7f));
+
+        if (measure)
+            _selfMs += (float)(System.Diagnostics.Stopwatch.GetTimestamp() - t0)
+                     * 1000f / System.Diagnostics.Stopwatch.Frequency;
     }
 
 
@@ -2241,6 +2253,16 @@ public partial class Plugin : BaseUnityPlugin
         }
         Log.LogWarning($"[NET] наших компонентов в сцене: SunMirrorNet={net}, SunMirrorDummy={dummy} " +
                        $"(персонажей {Character.AllCharacters.Count} — больше одного на персонажа это мусор)");
+
+        if (_fpsFrames > 0)
+        {
+            float avgFrame = _fpsAccum / _fpsFrames * 1000f;
+            float avgSelf = _selfMs / _fpsFrames;
+            Log.LogWarning($"[PERF] кадр {avgFrame:0.00} мс ({1000f / avgFrame:0} fps), " +
+                           $"из них наш Update {avgSelf:0.000} мс ({avgSelf / avgFrame * 100f:0.0}%), " +
+                           $"замер по {_fpsFrames} кадрам; ослеплено {_blinds.Count}, зеркало в руках {_holdingMirror}");
+            _fpsAccum = 0f; _fpsFrames = 0; _selfMs = 0f;
+        }
     }
 
     /// <summary>Печатает список доступных ртов — чтобы вписать нужный в конфиг BlindMouthName.</summary>
