@@ -1,47 +1,66 @@
 # Sun Mirror ☀️🪞
 
-Take out a little hand-mirror, catch the sun, and blast a **sunbeam** into your teammate's eyes — they stumble and faceplant. A friendly, banana-peel-style prank. No real damage, effect is short.
+Catch the sun with a frisbee and blind your teammate with the reflection.
 
-> **Only *you* need the mod.** Your victims — even random strangers with a vanilla game — get knocked down anyway, because the ragdoll is sent through the game's own networking.
+Pick up a frisbee, hold left mouse button, and a bright spot of sunlight crawls across
+whatever you point at. Walk it up a teammate's body to their eyes and they get dazzled:
+hands up over the face, frozen in that pose, spiral eyes, dazed mouth, unable to move
+or look away until you point the mirror somewhere else.
 
----
+Nobody falls. Nobody dies. It is a banana-peel prank, not a weapon.
 
-## How to use
+## What the victim actually sees
 
-| Key | Action |
-|-----|--------|
-| **G** | Take out / put away the mirror (it appears in your hand) |
-| **F** | Use it — reflect the sun where you're looking |
+| | with the mod | vanilla, no mod |
+|---|---|---|
+| Hands up over the face | yes | **yes** |
+| Head flinches back | yes | **yes** |
+| Spiral eyes, dazed mouth | yes | no |
+| Frozen in place, look locked | yes | no |
+| Blinding flare on their screen | yes | no |
 
-Aim at a teammate, press **F**, and watch them tumble. Keys are rebindable in the config.
+The pose and the flinch travel through the game's own networking, so strangers who have
+never heard of this mod still react visibly. Everything else needs the mod on their side.
 
-## What others see
+**There is no way around that, and there should not be.** Delivering the rest means
+running code on someone else's machine, and nothing should ever do that unless they
+installed it themselves. If you want the whole effect, everyone installs the mod.
 
-- **Everyone (no mod needed):** the victim ragdolls / faceplants.
-- **Players with the mod (and you):** the mirror model in your hand + the visible sunbeam. Great for clips.
+## Requirements
 
-That's just how multiplayer rendering works — custom visuals only draw for people who have the mod, but the *effect* reaches everyone.
+- BepInEx (BepInExPack_PEAK) — your mod manager pulls this in automatically.
+- Daylight. The beam only works when the sun actually reaches you: not at night,
+  not in shade, not indoors. That is deliberate.
 
 ## Install
 
-Use a mod manager (**r2modman** / **Gale** / Thunderstore Mod Manager): find **Sun Mirror**, click Install, launch modded. BepInEx is pulled in automatically.
+Use a mod manager (r2modman / Gale / Thunderstore Mod Manager): find **Sun Mirror**,
+click Install, launch modded.
 
-Manual: drop `Roman.SunMirror.dll` **and** `mirror.glb` together into `BepInEx/plugins/`.
+Manual: drop `Roman.SunMirror.dll` into `BepInEx/plugins/`. Nothing else is needed.
 
 ## Configuration
 
-Edit `BepInEx/config/Roman.SunMirror.cfg` (or use the in-game config manager):
+`BepInEx/config/Roman.SunMirror.cfg`, or an in-game config manager.
 
-- **Controls** — `EquipKey` (G), `UseKey` (F)
-- **Beam** — `Range`, `Width`, `Seconds`
-- **Effect** — `FallSeconds`, `FallShake`, and optional `ApplyStatuses` (adds a blinding Spores + Drowsy — works best when the target also has the mod)
-- **Model** — `HeldScale`, `HeldOffsetX/Y/Z`, `HeldYaw/Pitch/Roll` to fine-tune how the mirror sits in your hand
-
-## Credits
-
-- Mirror 3D model by **POLOOOO** (Sketchfab), licensed **CC BY 4.0**. *(Add the exact model link here before release.)*
-- Built with [PEAKLib](https://github.com/PEAKModding/PEAKLib) and BepInEx.
+- **Spot** — `Size`, `SpreadPerMeter`, `SpriteBrightness`: size and punch of the light spot.
+- **Emote** — `BlindHoldSeconds`, `BlindMouthName`, `PoseFreezeAt`: how long the daze lasts,
+  which mouth the victim gets, and which frame of the animation the pose holds on.
+- **Emote** — `VanillaFlinch`, `VanillaFlinchForce`: the head flinch that reaches players
+  without the mod. Set the force low; high values knock people over.
+- **Reflection** — `RealMirror`, `RealMirrorResolution`: the actual mirror surface.
+  Lower the resolution if you are tight on performance.
+- **Debug** — `DebugKeys`: developer keys, off by default.
 
 ## Notes
 
-Early prototype — feedback welcome. It's a for-fun troll mod; be nice out there. 🍌
+The mirror is the game's own frisbee, reskinned. It is held low with both hands so it
+never blocks your view, and the face turned towards your target is a real reflective
+surface rendered with the game's own mirror shader. You see the back of it, they see the
+glare — like a real signal mirror.
+
+## Credits
+
+Built with [PEAKLib](https://github.com/PEAKModding/PEAKLib) and BepInEx.
+No third-party models or textures are bundled: everything is either generated at runtime
+or reused from the game's own assets.

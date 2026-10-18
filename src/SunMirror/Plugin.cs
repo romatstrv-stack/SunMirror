@@ -150,7 +150,7 @@ public partial class Plugin : BaseUnityPlugin
         _blindHoldSeconds = Config.Bind("Emote", "BlindHoldSeconds", 6f, "Сколько держится ослепление после попадания зайчика в глаза.");
         _poseFreezeDelay = Config.Bind("Emote", "PoseFreezeDelay", 0.55f, "Через сколько секунд после начала эмоута заморозить позу (руки у глаз).");
         _rigAimTime    = Config.Bind("Debug", "RigAimSeconds", 1.0f, "Сколько зеркало-стенд наводит зайчика до ослепления.");
-        _debugKeys = Config.Bind("Debug", "DebugKeys", true, "Отладочные клавиши (B K L J C H U N P M O F8-F11 и подстройка наклона). Перед релизом false.");
+        _debugKeys = Config.Bind("Debug", "DebugKeys", false, "Отладочные клавиши (B K L J C H U N P M O F8-F11 и подстройка наклона). По умолчанию выключены: обычному игроку они не нужны.");
         _selfTarget    = Config.Bind("Debug", "SelfTarget", false, "Луч всегда бьёт в тебя — тест эффекта без второго игрока (клавиша J).");
         _blindOn       = Config.Bind("Emote", "BlindStars", true, "Ослепление со звёздочками над головой (Affliction_Blind).");
         _blindAfflictionSeconds = Config.Bind("Emote", "BlindAfflictionSeconds", 2.5f, "Мин. длительность нативного Affliction_Blind за одно обновление (сетевое, видно всем).");
