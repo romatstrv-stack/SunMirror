@@ -406,7 +406,8 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[Key.U].wasPressedThisFrame) EmergencyUnstick();   // застрял (старый баг) — отлипнуть
         if (kb[Key.P].wasPressedThisFrame) DebugBoardFlight();  // сразу вылететь на остров (отладка)
         if (kb[Key.M].wasPressedThisFrame) DebugNoon();
-        if (kb[Key.F11].wasPressedThisFrame) DebugSpawnBot();  // бот рядом — цель для теста сети         // перевести время на полдень (отладка)
+        if (kb[Key.F11].wasPressedThisFrame) DebugSpawnBot();  // бот рядом — цель для теста сети
+        if (kb[Key.F12].wasPressedThisFrame) DebugKillVictim();  // убить ослеплённого — проверка уборки         // перевести время на полдень (отладка)
         // Живая подстройка кадра позы: F9 раньше, F10 позже.
         // Config.Save() обязателен — иначе значение потеряется при следующей пересборке.
         bool poseMinus = kb[Key.F9].wasPressedThisFrame;
@@ -2167,6 +2168,23 @@ public partial class Plugin : BaseUnityPlugin
             catch (System.Exception e) { Log.LogWarning($"[M] ClearAllStatus: {e.Message}"); }
         }
         Log.LogWarning($"[M] Полдень (isDay={dn.isDay}) + статусы сняты.");
+    }
+
+    /// <summary>
+    /// Отладка: убить ослеплённую жертву (кроме себя), чтобы проверить, что эффект
+    /// снимается, а не остаётся висеть на трупе. RPCA_SetDead — метод самой игры,
+    /// он и выставляет data.dead, по которому мы жертву отпускаем.
+    /// </summary>
+    private void DebugKillVictim()
+    {
+        Character? target = null;
+        foreach (var kv in _blinds)
+            if (kv.Key != null && kv.Key != Character.localCharacter) { target = kv.Key; break; }
+
+        if (target == null) { Log.LogWarning("[F12] Нет ослеплённой жертвы, кроме тебя самого."); return; }
+        Log.LogWarning($"[F12] Убиваю ослеплённого '{target.name}' — смотрим, снимется ли эффект.");
+        try { target.RPCA_SetDead(); }
+        catch (System.Exception e) { Log.LogWarning($"[F12] RPCA_SetDead: {e.Message}"); }
     }
 
     /// <summary>
