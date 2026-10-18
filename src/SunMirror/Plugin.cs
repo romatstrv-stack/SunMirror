@@ -407,7 +407,8 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[Key.P].wasPressedThisFrame) DebugBoardFlight();  // сразу вылететь на остров (отладка)
         if (kb[Key.M].wasPressedThisFrame) DebugNoon();
         if (kb[Key.F11].wasPressedThisFrame) DebugSpawnBot();  // бот рядом — цель для теста сети
-        if (kb[Key.F12].wasPressedThisFrame) DebugKillVictim();  // убить ослеплённого — проверка уборки         // перевести время на полдень (отладка)
+        if (kb[Key.F12].wasPressedThisFrame) DebugKillVictim();  // убить ослеплённого — проверка уборки
+        if (kb[Key.F6].wasPressedThisFrame) DebugJoinTestRoom(); // свести два клиента в одну комнату Photon         // перевести время на полдень (отладка)
         // Живая подстройка кадра позы: F9 раньше, F10 позже.
         // Config.Save() обязателен — иначе значение потеряется при следующей пересборке.
         bool poseMinus = kb[Key.F9].wasPressedThisFrame;
@@ -2168,6 +2169,43 @@ public partial class Plugin : BaseUnityPlugin
             catch (System.Exception e) { Log.LogWarning($"[M] ClearAllStatus: {e.Message}"); }
         }
         Log.LogWarning($"[M] Полдень (isDay={dn.isDay}) + статусы сняты.");
+    }
+
+    /// <summary>
+    /// Отладка: загнать клиент в комнату Photon с фиксированным именем.
+    /// Нужно, чтобы свести два экземпляра игры на одной машине: PEAK собирает лобби
+    /// через Steam, а оба клиента будут под одним аккаунтом. Photon про Steam не знает,
+    /// комнаты у него свои — значит клиенты могут встретиться напрямую.
+    /// Это штатный метод PUN, а не обход чего-либо.
+    /// </summary>
+    private void DebugJoinTestRoom()
+    {
+        Log.LogWarning($"[F6] Photon до: состояние={PhotonNetwork.NetworkClientState} " +
+                       $"подключён={PhotonNetwork.IsConnected} вКомнате={PhotonNetwork.InRoom} " +
+                       $"офлайн={PhotonNetwork.OfflineMode} " +
+                       $"комната='{(PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : "нет")}' " +
+                       $"игроков={(PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.PlayerCount : 0)}");
+
+        if (PhotonNetwork.OfflineMode)
+        {
+            Log.LogWarning("[F6] Клиент в офлайне — выключаю офлайн и подключаюсь.");
+            PhotonNetwork.OfflineMode = false;
+        }
+
+        try
+        {
+            if (!PhotonNetwork.IsConnected)
+            {
+                Log.LogWarning("[F6] Нет соединения — ConnectUsingSettings(), жми F6 ещё раз через пару секунд.");
+                PhotonNetwork.ConnectUsingSettings();
+                return;
+            }
+
+            var opts = new Photon.Realtime.RoomOptions { MaxPlayers = 4, IsVisible = false, IsOpen = true };
+            bool ok = PhotonNetwork.JoinOrCreateRoom("SunMirrorTest", opts, Photon.Realtime.TypedLobby.Default);
+            Log.LogWarning($"[F6] JoinOrCreateRoom('SunMirrorTest') вернул {ok}.");
+        }
+        catch (System.Exception e) { Log.LogWarning($"[F6] не вышло: {e.GetType().Name}: {e.Message}"); }
     }
 
     /// <summary>
