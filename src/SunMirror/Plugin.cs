@@ -2095,9 +2095,47 @@ public partial class Plugin : BaseUnityPlugin
         var sp = Object.FindFirstObjectByType<BotSpawner>();
         var me = Character.localCharacter;
         if (sp == null || me == null) { Log.LogWarning("[F11] BotSpawner или персонаж не найдены."); return; }
-        Vector3 where = me.Center + me.transform.forward * 3f;
+        // Ставим ПО ВЗГЛЯДУ, а не по направлению тела: в PEAK они расходятся,
+        // и бот оказывался сбоку от экрана.
+        var cam = Camera.main;
+        Vector3 fwd = cam != null ? cam.transform.forward : me.transform.forward;
+        fwd.y = 0f;
+        if (fwd.sqrMagnitude < 1e-4f) fwd = me.transform.forward;
+        Vector3 where = me.Center + fwd.normalized * 4f;
         sp.SpawnBot(where);
+        StartCoroutine(FaceNewBot(where, me));
         Log.LogWarning($"[F11] Бот заспавнен у {where}.");
+    }
+
+    /// <summary>
+    /// Разворачивает только что созданного бота лицом к игроку: иначе он стоит спиной
+    /// и реакцию (глаза, рот, позу) просто не видно. Ищем по близости к точке спавна —
+    /// в Character.AllCharacters новичок попадает не сразу, поэтому ждём и пробуем несколько раз.
+    /// </summary>
+    private IEnumerator FaceNewBot(Vector3 where, Character me)
+    {
+        for (int attempt = 0; attempt < 10; attempt++)
+        {
+            yield return new WaitForSeconds(0.2f);
+            Character? found = null;
+            float best = 6f;
+            // Ищем по сцене, а не по Character.AllCharacters: локально созданный бот
+            // в этот список не попадает (он не регистрируется как сетевой персонаж).
+            foreach (var c in Object.FindObjectsByType<Character>(FindObjectsSortMode.None))
+            {
+                if (c == null || !c.isBot) continue;
+                float d = Vector3.Distance(c.Center, where);
+                if (d < best) { best = d; found = c; }
+            }
+            if (found == null) continue;
+
+            Vector3 dir = me.Center - found.Center; dir.y = 0f;
+            if (dir.sqrMagnitude < 1e-4f) yield break;
+            found.transform.rotation = Quaternion.LookRotation(dir.normalized);
+            Log.LogWarning($"[F11] Бот '{found.name}' развёрнут лицом к игроку (попытка {attempt + 1}).");
+            yield break;
+        }
+        Log.LogWarning("[F11] Бот рядом с точкой спавна не нашёлся — развернуть не смог.");
     }
 
     /// <summary>ВРЕМЕННО: что из сетевого/ботов вообще доступно в текущей сцене.</summary>
