@@ -2132,7 +2132,11 @@ public partial class Plugin : BaseUnityPlugin
             Vector3 dir = me.Center - found.Center; dir.y = 0f;
             if (dir.sqrMagnitude < 1e-4f) yield break;
             found.transform.rotation = Quaternion.LookRotation(dir.normalized);
-            Log.LogWarning($"[F11] Бот '{found.name}' развёрнут лицом к игроку (попытка {attempt + 1}).");
+            // Одного разворота мало: ИИ бота вернёт его обратно через кадр.
+            // Вешаем компонент, который держит его неподвижным и лицом к игроку.
+            if (found.GetComponent<SunMirrorDummy>() == null)
+                found.gameObject.AddComponent<SunMirrorDummy>();
+            Log.LogWarning($"[F11] Болванчик '{found.name}' поставлен лицом к игроку (попытка {attempt + 1}).");
             yield break;
         }
         Log.LogWarning("[F11] Бот рядом с точкой спавна не нашёлся — развернуть не смог.");
