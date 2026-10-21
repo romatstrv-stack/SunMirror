@@ -95,6 +95,7 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _blindAfflictionSeconds = null!;
     private ConfigEntry<bool> _nativeBlindOnSelf = null!;
     private ConfigEntry<float> _spriteBright = null!;
+    private ConfigEntry<float> _ringStrength = null!;
     private ConfigEntry<string> _blindMouth = null!;
     private ConfigEntry<float> _poseFreezeAt = null!;
     private ConfigEntry<float> _netSendEvery = null!;
@@ -141,12 +142,14 @@ public partial class Plugin : BaseUnityPlugin
         _tpDistance    = Config.Bind("Controls", "ThirdPersonDistance", 2.8f, "Дистанция камеры со стороны.");
         _range         = Config.Bind("Spot", "Range", 150f, "Дальность (метры).");
         _spotSize      = Config.Bind("Spot", "Size", 0.5f, "Базовый диаметр пятна (вблизи).");
-        _spread        = Config.Bind("Spot", "SpreadPerMeter", 0.04f, "Прибавка к диаметру на метр дистанции (рассеяние).");
+        _spread        = Config.Bind("Spot", "SpreadPerMeter", 0.009f, "Прибавка к диаметру на метр (рассеяние). 0.009 — настоящая расходимость солнечного зайчика: угловой размер Солнца 0,53 градуса даёт ~9 мм на метр. На 60 м пятно около метра.");
         _spotGlow      = Config.Bind("Spot", "Glow", 14f, "Яркость прожектора.");
         _heightFactor  = Config.Bind("Spot", "HeightFactor", 2f, "Высота источника = размер×это (больше = мягче край).");
         _smooth        = Config.Bind("Spot", "SmoothSpeed", 22f, "Сглаживание хода пятна (больше = резче/быстрее).");
         _showSprite    = Config.Bind("Spot", "ShowSprite", true, "Яркий спрайт в центре пятна.");
         _spriteBright  = Config.Bind("Spot", "SpriteBrightness", 2.4f, "Яркость зайчика. Больше 1 — уходит в пересвет и ловит блум; на ярком песке меньше 1.5 не читается.");
+        _ringStrength  = Config.Bind("Spot", "ContrastRing", 0f,
+            "ОПЫТНОЕ, по умолчанию выключено. Тёмный ободок вокруг зайчика: аддитивное пятно на ярком песке не читается, ободок затемняет фон по краю и возвращает контраст. Включать значением 0.3-0.6.");
         _requireSun    = Config.Bind("Spot", "RequireSunlight", true, "Светить только когда солнце падает на игрока (день и не в тени).");
         _fallSeconds   = Config.Bind("Effect", "FallSeconds", 1.6f, "Секунд рэгдолла.");
         _fallShake     = Config.Bind("Effect", "FallShake", 0.6f, "Тряска экрана.");
@@ -1525,9 +1528,74 @@ public partial class Plugin : BaseUnityPlugin
             // аддитивное смешивание и цвет выше 1 — тогда его подхватывает блум игры.
             var mat = MakeAdditiveSpotMaterial();
             mr.material = mat;
+
+            // Контрастный ободок. Аддитивное пятно на залитом солнцем песке не читается:
+            // складывать уже некуда, песок и так почти белый. Яркость тут не помогает —
+            // она лишь глубже уводит в пересвет. Поэтому рядом с ядром кладём слой,
+            // который не складывает, а УМНОЖАЕТ, то есть затемняет фон кольцом вокруг
+            // пятна. Тёмный ободок даёт краю контраст, и зайчик виден на любой поверхности.
+            if (_ringStrength.Value > 0.01f)
+            {
+                var ring = GameObject.CreatePrimitive(PrimitiveType.Quad);
+                ring.name = "SunSpotRing";
+                var rc = ring.GetComponent<Collider>(); if (rc != null) Destroy(rc);
+                var rmr = ring.GetComponent<MeshRenderer>();
+                rmr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                rmr.receiveShadows = false;
+                rmr.material = MakeMultiplyRingMaterial();
+                ring.transform.SetParent(_spotQuad.transform, false);
+                ring.transform.localScale = new Vector3(1.7f, 1.7f, 1f);
+                // чуть ближе к наблюдателю, иначе слои дерутся за один пиксель
+                ring.transform.localPosition = new Vector3(0f, 0f, -0.001f);
+            }
+
             _spotQuad.SetActive(false);
             DontDestroyOnLoad(_spotQuad);
         }
+    }
+
+    /// <summary>Кольцо: белое (не меняет фон) везде, кроме тёмной полосы вокруг ядра.</summary>
+    private static Texture2D? _ringTex;
+    private Texture2D RingTex()
+    {
+        if (_ringTex != null) return _ringTex;
+        int s = 128;
+        var t = new Texture2D(s, s, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp };
+        var px = new Color[s * s];
+        float k = Mathf.Clamp01(_ringStrength.Value);
+        for (int y = 0; y < s; y++)
+        for (int x = 0; x < s; x++)
+        {
+            float dx = (x - s / 2f) / (s / 2f), dy = (y - s / 2f) / (s / 2f);
+            float d = Mathf.Sqrt(dx * dx + dy * dy);
+            // Полоса затемнения живёт между ядром (оно занимает ~0.55 этого квада)
+            // и краем. Колокол: 0 на границах полосы, максимум посередине.
+            float u = Mathf.InverseLerp(0.55f, 0.92f, d);
+            float bell = (u <= 0f || u >= 1f) ? 0f : Mathf.Sin(u * Mathf.PI);
+            float v = 1f - k * bell;            // 1 = фон не трогаем, меньше = темнее
+            px[y * s + x] = new Color(v, v, v, 1f);
+        }
+        t.SetPixels(px); t.Apply(false, false);
+        t.filterMode = FilterMode.Bilinear;
+        _ringTex = t; return t;
+    }
+
+    private Material MakeMultiplyRingMaterial()
+    {
+        var sh = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Sprites/Default");
+        var m = new Material(sh) { name = "SunSpotRingMat" };
+        m.SetFloat("_Surface", 1f);
+        m.SetFloat("_ZWrite", 0f);
+        // Умножение: результат = цвет_кадра * цвет_текстуры.
+        m.SetFloat("_SrcBlend", (float)UnityEngine.Rendering.BlendMode.DstColor);
+        m.SetFloat("_DstBlend", (float)UnityEngine.Rendering.BlendMode.Zero);
+        m.SetFloat("_AlphaClip", 0f);
+        m.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
+        m.renderQueue = 3099;               // строго раньше ядра (3100)
+        m.SetTexture("_BaseMap", RingTex());
+        m.mainTexture = RingTex();
+        m.SetColor("_BaseColor", Color.white);
+        return m;
     }
 
     private static Texture2D? _circleTex;
