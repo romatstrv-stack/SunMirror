@@ -63,6 +63,7 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _range = null!, _spotSize = null!, _spread = null!, _spotGlow = null!, _heightFactor = null!, _smooth = null!;
     private ConfigEntry<bool> _showSprite = null!, _requireSun = null!;
     private ConfigEntry<float> _fallSeconds = null!, _fallShake = null!;
+    private ConfigEntry<bool> _fallAtMax = null!;
     private ConfigEntry<bool> _applyStatuses = null!;
     private ConfigEntry<float> _sporesAmount = null!, _drowsyAmount = null!;
     private ConfigEntry<float> _glareStrength = null!;
@@ -149,6 +150,8 @@ public partial class Plugin : BaseUnityPlugin
         _requireSun    = Config.Bind("Spot", "RequireSunlight", true, "Светить только когда солнце падает на игрока (день и не в тени).");
         _fallSeconds   = Config.Bind("Effect", "FallSeconds", 1.6f, "Секунд рэгдолла.");
         _fallShake     = Config.Bind("Effect", "FallShake", 0.6f, "Тряска экрана.");
+        _fallAtMax     = Config.Bind("Emote", "FallAtMaxBlind", false,
+            "Ронять цель в конце ослепления (по потолку MaxBlindSeconds). Выключено по умолчанию: падение летит штатным RPC игры и валит даже тех, у кого мода нет.");
         _applyStatuses = Config.Bind("Effect", "ApplyStatuses", false, "Spores/Drowsy (на незнакомцах может не сработать).");
         _sporesAmount  = Config.Bind("Effect", "SporesAmount", 0.5f, "Кол-во Spores.");
         _drowsyAmount  = Config.Bind("Effect", "DrowsyAmount", 0.4f, "Кол-во Drowsy.");
@@ -1914,6 +1917,21 @@ public partial class Plugin : BaseUnityPlugin
                 _cooldownUntil[key] = Time.time + Mathf.Max(0f, _cooldown.Value);
                 Log.LogInfo($"Ослепление '{victim.name}' прервано по потолку {_maxBlind.Value:0.0} с; " +
                             $"повтор не раньше чем через {_cooldown.Value:0.0} с.");
+
+                // Падение в конце ослепления. По умолчанию выключено нарочно:
+                // Character.Fall шлёт RPCA_Fall на ВСЕХ, то есть роняет и тех, у кого
+                // мода нет. Это уже не шутка, а выключение человека из игры, поэтому
+                // решение оставлено хозяину лобби, а не навязано дефолтом.
+                if (_fallAtMax.Value)
+                {
+                    try
+                    {
+                        victim.Fall(_fallSeconds.Value, _fallShake.Value);
+                        Log.LogInfo($"Падение '{victim.name}' на {_fallSeconds.Value:0.0} с (тряска {_fallShake.Value:0.0}).");
+                    }
+                    catch (System.Exception e) { Log.LogWarning($"Падение не вышло: {e.GetType().Name}: {e.Message}"); }
+                }
+
                 RestoreBlind(victim);
                 return;
             }
