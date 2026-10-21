@@ -2479,10 +2479,43 @@ public partial class Plugin : BaseUnityPlugin
             // Вешаем компонент, который держит его неподвижным и лицом к игроку.
             if (!HasOurComponent(found.gameObject, "SunMirrorDummy"))
                 found.gameObject.AddComponent<SunMirrorDummy>();
+            CopyLookToBot(found);
             Log.LogWarning($"[F11] Болванчик '{found.name}' поставлен лицом к игроку (попытка {attempt + 1}).");
             yield break;
         }
         Log.LogWarning("[F11] Бот рядом с точкой спавна не нашёлся — развернуть не смог.");
+    }
+
+    /// <summary>
+    /// Одеть бота так же, как выглядит игрок.
+    ///
+    /// Болванчик заменяет живого тиммейта — и в отладке, и на съёмке. Стандартный бот
+    /// выглядит иначе, и кадр получается «не про игроков». Внешность в PEAK лежит не на
+    /// персонаже, а в сервисе PersistentPlayerDataService (по Photon-игроку), а применяет
+    /// её CharacterCustomization.OnPlayerDataChange — ему и скармливаем свои данные.
+    /// </summary>
+    private void CopyLookToBot(Character bot)
+    {
+        try
+        {
+            var cc = bot.refs?.customization;
+            if (cc == null) { Log.LogWarning("[F11] У бота нет CharacterCustomization."); return; }
+
+            var svc = GameHandler.GetService<PersistentPlayerDataService>();
+            var mine = svc?.GetPlayerData(PhotonNetwork.LocalPlayer);
+            if (mine == null) { Log.LogWarning("[F11] Свои настройки внешности не нашлись."); return; }
+
+            // Без этого применение молча выйдет на первой же строке OnPlayerDataChange:
+            // боты по умолчанию косметику игроков игнорируют.
+            cc.ignorePlayerCosmetics = false;
+            cc.useDebugColor = false;
+            cc.OnPlayerDataChange(mine);
+
+            var d = mine.customizationData;
+            Log.LogWarning($"[F11] Бот одет как игрок: кожа={d.currentSkin} наряд={d.currentOutfit} " +
+                           $"шляпа={d.currentHat} глаза={d.currentEyes} рот={d.currentMouth}.");
+        }
+        catch (System.Exception e) { Log.LogWarning($"[F11] Внешность бота: {e.GetType().Name}: {e.Message}"); }
     }
 
     /// <summary>ВРЕМЕННО: что из сетевого/ботов вообще доступно в текущей сцене.</summary>
