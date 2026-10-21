@@ -7,7 +7,9 @@ using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
 using Peak.Afflictions;
+using Peak.Network;
 using Photon.Pun;
+using Photon.Realtime;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.SceneManagement;
@@ -97,6 +99,8 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _netSendEvery = null!;
     private ConfigEntry<bool> _flinch = null!;
     private ConfigEntry<bool> _debugKeys = null!;
+    private ConfigEntry<bool> _autoJoinRoom = null!;
+    private string? _guestUserId;   // свой Photon UserId для второго клиента на той же машине
     private ConfigEntry<float> _signalGrow = null!;
     private ConfigEntry<float> _signalMax = null!;
     private ConfigEntry<float> _beamLinger = null!;
@@ -156,6 +160,9 @@ public partial class Plugin : BaseUnityPlugin
         _poseFreezeDelay = Config.Bind("Emote", "PoseFreezeDelay", 0.55f, "Через сколько секунд после начала эмоута заморозить позу (руки у глаз).");
         _rigAimTime    = Config.Bind("Debug", "RigAimSeconds", 1.0f, "Сколько зеркало-стенд наводит зайчика до ослепления.");
         _debugKeys = Config.Bind("Debug", "DebugKeys", false, "Отладочные клавиши (B K L J C H U N P M O F5-F12 и подстройка наклона). По умолчанию выключены: обычному игроку они не нужны.");
+        _autoJoinRoom = Config.Bind("Debug", "AutoJoinHandshakeRoom", false,
+            "Отладка на одной машине: при запуске сам войти в комнату, имя которой хост положил в sunmirror_room.txt (клавиша F7). Ставится только на втором клиенте.");
+        if (_autoJoinRoom.Value) StartCoroutine(AutoJoinLoop());
         _selfTarget    = Config.Bind("Debug", "SelfTarget", false, "Луч всегда бьёт в тебя — тест эффекта без второго игрока (клавиша J).");
         _blindOn       = Config.Bind("Emote", "BlindStars", true, "Ослепление со звёздочками над головой (Affliction_Blind).");
         _blindAfflictionSeconds = Config.Bind("Emote", "BlindAfflictionSeconds", 2.5f, "Мин. длительность нативного Affliction_Blind за одно обновление (сетевое, видно всем).");
@@ -409,6 +416,7 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[Key.F12].wasPressedThisFrame) DebugKillVictim();  // убить ослеплённого — проверка уборки
         if (kb[Key.F6].wasPressedThisFrame) DebugJoinTestRoom(); // свести два клиента в одну комнату Photon
         if (kb[Key.F5].wasPressedThisFrame) DebugLobbyLink();   // достать ссылку-приглашение в лобби
+        if (kb[Key.F7].wasPressedThisFrame) DebugRoomHandshake(); // рукопожатие двух клиентов на одной машине
         // Живая подстройка кадра позы: F9 раньше, F10 позже.
         // Config.Save() обязателен — иначе значение потеряется при следующей пересборке.
         bool poseMinus = kb[Key.F9].wasPressedThisFrame;
@@ -2236,6 +2244,171 @@ public partial class Plugin : BaseUnityPlugin
             Log.LogWarning($"[F6] JoinOrCreateRoom('SunMirrorTest') вернул {ok}.");
         }
         catch (System.Exception e) { Log.LogWarning($"[F6] не вышло: {e.GetType().Name}: {e.Message}"); }
+    }
+
+    /// <summary>
+    /// Отладка: свести два клиента на одной машине в одну комнату, мимо Steam-лобби.
+    ///
+    /// Steam не даёт запустить игру дважды с одного аккаунта, но сетевая часть PEAK
+    /// живёт в Photon, а не в Steam. Поэтому хост, уже начавший забег, по F7 кладёт
+    /// имя своей комнаты в файл во временной папке, а второй клиент по F7 это имя
+    /// читает и входит в ту же комнату. Дальше игра сама спавнит персонажа вошедшего —
+    /// и становится видно, доходят ли наши RPC до ЧУЖОГО клиента. Ради одной этой
+    /// проверки и затевалось: на одном клиенте её не сделать никак.
+    /// </summary>
+    private static string RoomHandshakeFile =>
+        Path.Combine(Path.GetTempPath(), "sunmirror_room.txt");
+
+    /// <summary>
+    /// Второй клиент сам входит в комнату хоста. Нужно потому, что окно второго
+    /// клиента может быть недоступно для управления: нажать там клавишу нечем,
+    /// а войти надо. Пробуем раз в пять секунд, пока не окажемся в комнате.
+    /// </summary>
+    private void OnPhotonOpResponse(ExitGames.Client.Photon.OperationResponse r)
+    {
+        if (r.ReturnCode != 0)
+            Log.LogWarning($"[PHOTON] операция {r.OperationCode}: отказ, код={r.ReturnCode}, сообщение='{r.DebugMessage}'");
+    }
+
+    private IEnumerator AutoJoinLoop()
+    {
+        yield return new WaitForSecondsRealtime(20f);   // дать меню и сервисам подняться
+        // Фотон не говорит причину отказа через PhotonNetwork — она приходит
+        // отдельным ответом на операцию. Без неё «не вошёл» остаётся загадкой.
+        if (PhotonNetwork.NetworkingClient != null)
+            PhotonNetwork.NetworkingClient.OpResponseReceived += OnPhotonOpResponse;
+
+        // Цикл не кончается нарочно: при смене сцены (перелёт на остров) гостя
+        // выбрасывает из комнаты, и вернуться он должен сам — нажать клавишу
+        // в его окне может быть некому. Заодно это единственная телеметрия
+        // со второго клиента: его экран нам не виден.
+        int tick = 0;
+        while (true)
+        {
+            if (!PhotonNetwork.InRoom)
+            {
+                // Дёргать вход, пока предыдущая попытка ещё в пути, бессмысленно и вредно:
+                // клиент застревает в Joining. Трогаем только «устоявшиеся» состояния.
+                var st = PhotonNetwork.NetworkClientState;
+                bool settled = st == ClientState.PeerCreated
+                            || st == ClientState.Disconnected
+                            || st == ClientState.ConnectedToMasterServer;
+                if (settled)
+                {
+                    Log.LogWarning($"[AUTOJOIN] не в комнате, состояние={st}");
+                    DebugRoomHandshake();
+                }
+                yield return new WaitForSecondsRealtime(5f);
+                continue;
+            }
+
+            if (tick++ % 2 == 0)
+            {
+                var me = Character.localCharacter;
+                Log.LogWarning($"[AUTOJOIN] в комнате '{PhotonNetwork.CurrentRoom.Name}', " +
+                               $"игроков {PhotonNetwork.CurrentRoom.PlayerCount}, " +
+                               $"свой персонаж={(me != null ? "есть" : "нет")}, " +
+                               $"сцена '{SceneManager.GetActiveScene().name}'");
+            }
+            yield return new WaitForSecondsRealtime(5f);
+        }
+    }
+
+    private void DebugRoomHandshake()
+    {
+        try
+        {
+            // Писать имя комнаты — дело хоста. Гость (он же автовход) этого не делает,
+            // иначе затрёт файл своим же значением и запутает следующий запуск.
+            if (PhotonNetwork.InRoom && !_autoJoinRoom.Value)
+            {
+                string mine = PhotonNetwork.CurrentRoom.Name;
+                File.WriteAllText(RoomHandshakeFile, mine);
+                Log.LogWarning($"[F7] Я в комнате '{mine}' (игроков {PhotonNetwork.CurrentRoom.PlayerCount}), " +
+                               $"регион '{PhotonNetwork.CloudRegion}'. Имя записано в {RoomHandshakeFile}");
+                return;
+            }
+
+            if (!File.Exists(RoomHandshakeFile))
+            {
+                Log.LogWarning($"[F7] Нет файла {RoomHandshakeFile} — сначала нажми F7 на хосте, уже начавшем забег.");
+                return;
+            }
+
+            string name = File.ReadAllText(RoomHandshakeFile).Trim();
+            if (string.IsNullOrEmpty(name)) { Log.LogWarning("[F7] В файле пусто."); return; }
+
+            // Просто PhotonNetwork.JoinRoom мало: игра ведёт вход через свою машину
+            // состояний (ConnectionService). Если её не выставить, OnJoinedRoom уйдёт
+            // не туда, сцена не загрузится и персонаж не появится. Поэтому выставляем
+            // ровно то состояние, которое игра использует для «войти в конкретную комнату».
+            var svc = GameHandler.GetService<ConnectionService>();
+            if (svc == null) { Log.LogWarning("[F7] ConnectionService недоступен."); return; }
+
+            svc.StateMachine.SwitchState<JoinSpecificRoomState>();
+            if (svc.StateMachine.CurrentState is JoinSpecificRoomState js)
+            {
+                js.RoomName = name;
+                // Тот же регион, что и сейчас — тогда игра идёт прямо в JoinRoom,
+                // без переподключения к другому облаку.
+                js.RegionToJoin = PhotonNetwork.CloudRegion;
+                Log.LogWarning($"[F7] Состояние -> JoinSpecificRoomState, комната '{name}', регион '{js.RegionToJoin}'.");
+            }
+            else
+            {
+                Log.LogWarning("[F7] Не удалось переключить состояние подключения.");
+                return;
+            }
+
+            if (PhotonNetwork.OfflineMode)
+            {
+                Log.LogWarning("[F7] Клиент в офлайне — выключаю офлайн.");
+                PhotonNetwork.OfflineMode = false;
+            }
+
+            if (!PhotonNetwork.IsConnected)
+            {
+                if (_guestUserId == null)
+                {
+                    // Важно: именно метод игры, а не голый ConnectUsingSettings.
+                    // Игра перед подключением выставляет GameVersion и AppVersion из версии
+                    // сборки — без этого клиент попадает в другую «версию приложения»
+                    // и комнаты хоста просто не видит: Photon отвечает «Game does not exist».
+                    Log.LogWarning("[F7] Нет соединения — подключаюсь методом игры NetworkingUtilities.ConnectToNetwork().");
+                    NetworkingUtilities.ConnectToNetwork();
+                }
+                else
+                {
+                    // Версию приложения игра уже выставила при первом подключении —
+                    // это статические поля, они сохранились. Теперь заходим под своим UserId.
+                    PhotonNetwork.AuthValues = new Photon.Realtime.AuthenticationValues(_guestUserId);
+                    PhotonNetwork.NickName = "SunMirror-гость";
+                    Log.LogWarning($"[F7] Переподключаюсь со своим UserId '{_guestUserId}'.");
+                    PhotonNetwork.ConnectUsingSettings();
+                }
+                return;
+            }
+
+            if (_guestUserId == null)
+            {
+                // Оба клиента на одной машине берут Photon UserId из одного SteamID,
+                // и второму Photon отказывает: «UserId already joined the specified game».
+                // Поэтому гостю выдаём собственный идентификатор и перезаходим с ним.
+                string baseId = PhotonNetwork.AuthValues != null ? PhotonNetwork.AuthValues.UserId : "guest";
+                _guestUserId = baseId + "-sm2";
+                Log.LogWarning($"[F7] UserId совпадает с хостом ('{baseId}'). Отключаюсь и зайду как '{_guestUserId}'.");
+                PhotonNetwork.Disconnect();
+                return;
+            }
+
+            Log.LogWarning($"[F7] GameVersion='{PhotonNetwork.GameVersion}' " +
+                           $"AppVersion='{PhotonNetwork.PhotonServerSettings.AppSettings.AppVersion}' " +
+                           $"регион='{PhotonNetwork.CloudRegion}' UserId='{PhotonNetwork.AuthValues?.UserId}'");
+
+            bool ok = PhotonNetwork.JoinRoom(name);
+            Log.LogWarning($"[F7] JoinRoom('{name}') вернул {ok}. Состояние={PhotonNetwork.NetworkClientState}");
+        }
+        catch (System.Exception e) { Log.LogWarning($"[F7] не вышло: {e.GetType().Name}: {e.Message}"); }
     }
 
     /// <summary>
