@@ -116,8 +116,7 @@ public partial class Plugin : BaseUnityPlugin
     private Camera? _tpCam;
     private bool _tpActive;
     private float _selfDemoUntil;
-    private bool _bonesLogged;
-    private bool _triedLoad, _emotesLogged;
+    private bool _emotesLogged;
 
     private Vector3 _spotPos;
     private bool _spotHasPos;
@@ -156,7 +155,7 @@ public partial class Plugin : BaseUnityPlugin
         _blindHoldSeconds = Config.Bind("Emote", "BlindHoldSeconds", 6f, "Сколько держится ослепление после попадания зайчика в глаза.");
         _poseFreezeDelay = Config.Bind("Emote", "PoseFreezeDelay", 0.55f, "Через сколько секунд после начала эмоута заморозить позу (руки у глаз).");
         _rigAimTime    = Config.Bind("Debug", "RigAimSeconds", 1.0f, "Сколько зеркало-стенд наводит зайчика до ослепления.");
-        _debugKeys = Config.Bind("Debug", "DebugKeys", false, "Отладочные клавиши (B K L J C H U N P M O F8-F11 и подстройка наклона). По умолчанию выключены: обычному игроку они не нужны.");
+        _debugKeys = Config.Bind("Debug", "DebugKeys", false, "Отладочные клавиши (B K L J C H U N P M O F5-F12 и подстройка наклона). По умолчанию выключены: обычному игроку они не нужны.");
         _selfTarget    = Config.Bind("Debug", "SelfTarget", false, "Луч всегда бьёт в тебя — тест эффекта без второго игрока (клавиша J).");
         _blindOn       = Config.Bind("Emote", "BlindStars", true, "Ослепление со звёздочками над головой (Affliction_Blind).");
         _blindAfflictionSeconds = Config.Bind("Emote", "BlindAfflictionSeconds", 2.5f, "Мин. длительность нативного Affliction_Blind за одно обновление (сетевое, видно всем).");
@@ -408,7 +407,8 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[Key.M].wasPressedThisFrame) DebugNoon();
         if (kb[Key.F11].wasPressedThisFrame) DebugSpawnBot();  // бот рядом — цель для теста сети
         if (kb[Key.F12].wasPressedThisFrame) DebugKillVictim();  // убить ослеплённого — проверка уборки
-        if (kb[Key.F6].wasPressedThisFrame) DebugJoinTestRoom(); // свести два клиента в одну комнату Photon         // перевести время на полдень (отладка)
+        if (kb[Key.F6].wasPressedThisFrame) DebugJoinTestRoom(); // свести два клиента в одну комнату Photon
+        if (kb[Key.F5].wasPressedThisFrame) DebugLobbyLink();   // достать ссылку-приглашение в лобби
         // Живая подстройка кадра позы: F9 раньше, F10 позже.
         // Config.Save() обязателен — иначе значение потеряется при следующей пересборке.
         bool poseMinus = kb[Key.F9].wasPressedThisFrame;
@@ -1333,9 +1333,8 @@ public partial class Plugin : BaseUnityPlugin
         return bestD < float.MaxValue;
     }
 
-    private float _timeOnVictim;
-    private bool _emotePlayed, _stunned;
-    private void ClearTarget() { _victim = null; _timeOnVictim = 0f; _emotePlayed = false; _stunned = false; }
+    private bool _emotePlayed;
+    private void ClearTarget() { _victim = null; _emotePlayed = false; }
 
     private void UpdateSpot()
     {
@@ -1398,7 +1397,7 @@ public partial class Plugin : BaseUnityPlugin
             { _glareSourcePos = _discMesh.position; _glareSourceValid = true; }
         }
 
-        if (victim != _victim) { _victim = victim; _timeOnVictim = 0f; _emotePlayed = false; _stunned = false; }
+        if (victim != _victim) { _victim = victim; _emotePlayed = false; }
 
         if (!_emotePlayed)
         {
@@ -2169,6 +2168,37 @@ public partial class Plugin : BaseUnityPlugin
             catch (System.Exception e) { Log.LogWarning($"[M] ClearAllStatus: {e.Message}"); }
         }
         Log.LogWarning($"[M] Полдень (isDay={dn.isDay}) + статусы сняты.");
+    }
+
+    /// <summary>
+    /// Отладка: достаёт ссылку-приглашение в текущее лобби Steam.
+    /// Нужна, чтобы позвать людей, которых нет в друзьях: оверлей Steam для этого
+    /// открывать не обязательно, id лобби игра и так держит в SteamLobbyHandler.
+    /// </summary>
+    private void DebugLobbyLink()
+    {
+        try
+        {
+            var h = GameHandler.GetService<SteamLobbyHandler>();
+            if (h == null) { Log.LogWarning("[F5] SteamLobbyHandler недоступен."); return; }
+
+            string lobby = h.CurrentLobbyID;
+            bool inLobby = h.InSteamLobby();
+            Log.LogWarning($"[F5] лобби='{lobby}' вЛобби={inLobby}");
+
+            if (string.IsNullOrEmpty(lobby) || lobby == "0")
+            {
+                Log.LogWarning("[F5] Лобби ещё не создано.");
+                return;
+            }
+
+            ulong owner = 0;
+            try { owner = Steamworks.SteamMatchmaking.GetLobbyOwner(h.LobbySteamId).m_SteamID; }
+            catch (System.Exception e) { Log.LogWarning($"[F5] владелец лобби: {e.Message}"); }
+
+            Log.LogWarning($"[F5] ССЫЛКА: steam://joinlobby/3527290/{lobby}/{owner}");
+        }
+        catch (System.Exception e) { Log.LogWarning($"[F5] не вышло: {e.GetType().Name}: {e.Message}"); }
     }
 
     /// <summary>
