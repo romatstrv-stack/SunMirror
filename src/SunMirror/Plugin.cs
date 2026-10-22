@@ -98,6 +98,7 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _ringStrength = null!;
     private ConfigEntry<string> _blindMouth = null!;
     private ConfigEntry<float> _poseFreezeAt = null!;
+    private ConfigEntry<float> _poseSwing = null!, _poseSwingSpeed = null!;
     private ConfigEntry<float> _netSendEvery = null!;
     private ConfigEntry<bool> _flinch = null!;
     private ConfigEntry<bool> _debugKeys = null!;
@@ -109,6 +110,9 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _maxBlind = null!;
     private ConfigEntry<float> _cooldown = null!;
     private ConfigEntry<float> _flinchForce = null!;
+    private ConfigEntry<float> _wobbleForce = null!, _wobbleEvery = null!, _shakeOffForce = null!, _staggerForce = null!;
+    private ConfigEntry<string> _emoteB = null!, _blindSfx = null!;
+    private ConfigEntry<float> _emoteSwapEvery = null!;
     private string _emoteState = "";
     private ConfigEntry<bool> _showModel = null!;
     private ConfigEntry<float> _targetSize = null!, _heldScale = null!;
@@ -180,12 +184,32 @@ public partial class Plugin : BaseUnityPlugin
         _beamLinger = Config.Bind("Emote", "BeamLingerSeconds", 3f, "Сколько ослепление держится после того, как луч ушёл с глаз. Он же задаёт, скольких можно держать разом, проводя лучом по группе.");
         _cooldown = Config.Bind("Emote", "CooldownSeconds", 4f, "Пауза, в течение которой ту же цель ослепить нельзя. Защита от удержания в цикле.");
         _flinchForce = Config.Bind("Emote", "VanillaFlinchForce", 14f, "Сила отдёргивания головы. Больше 30 валит персонажа — нам нужно вздрагивание, а не нокдаун.");
+        // Три такта реакции. Замершая поза со стороны выглядит как зависший персонаж,
+        // а PEAK — игра про потерю равновесия, в ней смешно именно шатание.
+        _staggerForce  = Config.Bind("Emote", "StaggerForce", 9f,
+            "Толчок всего тела в момент попадания — жертву качает назад. 0 — выключить. Больше 20 валит с ног.");
+        _wobbleForce   = Config.Bind("Emote", "WobbleForce", 7f,
+            "Сила покачивания, пока держится ослепление. Жертва топчется и шатается, прикрывая лицо. 0 — стоять столбом.");
+        _wobbleEvery   = Config.Bind("Emote", "WobbleEverySeconds", 0.35f,
+            "Как часто толкать при покачивании. Меньше — суетливее.");
+        _shakeOffForce = Config.Bind("Emote", "ShakeOffForce", 11f,
+            "Встряс в момент, когда луч ушёл — чтобы конец эффекта тоже читался. 0 — выключить.");
+        _emoteB        = Config.Bind("Emote", "BlindEmoteB", "A_Scout_Emote_Nono",
+            "Второй эмоут, с которым чередуется основной: жертва то закрывается руками, то отмахивается. Пусто — держать одну позу, как раньше. Список имён печатает клавиша N.");
+        _emoteSwapEvery = Config.Bind("Emote", "EmoteSwapSeconds", 0f,
+            "Как часто чередовать позу со вторым эмоутом. 0 — не чередовать (по умолчанию: имя второго состояния в бою не проверено, а при опечатке поза пропадала бы через раз).");
+        _blindSfx      = Config.Bind("Emote", "BlindSfxName", "",
+            "Имя звука игры, который играть при попадании в глаза. Пусто — без звука. Список доступных имён печатает клавиша N.");
         // Нативное ослепление игры рисует СВОЮ пелену на весь экран (IllegalScreenEffect, статус "BLIND").
         // Чужому игроку это и нужно — он без мода, иначе не почувствует ничего. А себе — нет:
         // именно эта пелена и была «туманом», который не снимался ни слоями [O], ни клавишей U.
         _nativeBlindOnSelf = Config.Bind("Emote", "NativeBlindOnSelf", false, "Вешать нативное ослепление игры (с экранной пеленой) на СЕБЯ. Для тестов обычно false — слепит только звезда.");
         _blindMouth = Config.Bind("Emote", "BlindMouthName", "", "Рот ослеплённого: имя варианта из Customization.mouths (список печатает клавиша N). Пусто — рот не менять.");
         _poseFreezeAt = Config.Bind("Emote", "PoseFreezeAt", 0.35f, "Кадр клипа эмоута (0..1), на котором держим позу. Подбор в игре: F9 раньше, F10 позже.");
+        _poseSwing     = Config.Bind("Emote", "PoseSwing", 0.07f,
+            "Насколько водить кадр позы туда-обратно вокруг PoseFreezeAt. 0 — застывшая поза, как было. Это и даёт движение рук у лица.");
+        _poseSwingSpeed = Config.Bind("Emote", "PoseSwingSpeed", 4.5f,
+            "Скорость этого покачивания позы.");
         _showModel     = Config.Bind("Model", "ShowModel", true, "Показывать модель зеркала в руке.");
         _targetSize    = Config.Bind("Model", "BaseSize", 0.3f, "Габарит модели (метры).");
         _heldScale     = Config.Bind("Model", "HeldScale", 1f, "Множитель масштаба.");
@@ -412,7 +436,7 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[_selfTestKey.Value].wasPressedThisFrame) SelfRagdollTest();
         if (kb[_thirdPersonKey.Value].wasPressedThisFrame) ToggleThirdPerson();
         if (kb[_giveKey.Value].wasPressedThisFrame) GiveBinoculars();
-        if (kb[Key.N].wasPressedThisFrame) { ScanShinyMaterials(); DumpMouths(); _emotesLogged = false; LogEmotesOnce(); ProbeNetwork(); }
+        if (kb[Key.N].wasPressedThisFrame) { ScanShinyMaterials(); DumpMouths(); DumpSfx(); _emotesLogged = false; LogEmotesOnce(); ProbeNetwork(); }
         // (LogGuidebookOnce убран: он сканировал сцену КАЖДЫЙ кадр и никогда не находил
         //  руководство после перехода на тарелочку — это и были лаги.)
         if (kb[Key.U].wasPressedThisFrame) EmergencyUnstick();   // застрял (старый баг) — отлипнуть
@@ -1738,6 +1762,10 @@ public partial class Plugin : BaseUnityPlugin
         public string emoteState = "";
         public CharacterMovement? mv;    // только если жертва — локальный игрок
         public float moveModPrev = 1f;
+        public float nextWobbleAt;       // когда следующий толчок качания
+        public float wobbleSide = 1f;    // в какую сторону толкаем — чередуется
+        public float nextEmoteAt;        // когда менять эмоут
+        public bool emoteOnB;            // сейчас проигрывается второй эмоут
         // Бэкап текстур лица СВОЙ у каждой жертвы: общий список возвращал чужие текстуры.
         public readonly System.Collections.Generic.List<(Material mat, string prop, Texture? tex)> faceBackup = new();
     }
@@ -1825,6 +1853,61 @@ public partial class Plugin : BaseUnityPlugin
     /// поэтому это работает и на игроке БЕЗ мода — в отличие от глаз, рта и обездвиживания.
     /// Толкаем ТОЛЬКО голову (wholeBodyForce = ноль), иначе персонаж улетит.
     /// </summary>
+    /// <summary>
+    /// Качание ослеплённого. Главное про комедию в PEAK: смешное здесь — это потеря
+    /// равновесия, а не поза. Замершая намертво фигура со стороны читается как
+    /// зависший персонаж, а не как человек, которому бьют в глаза. Поэтому пока
+    /// держим ослепление, раз в несколько десятых секунды толкаем корпус то в одну
+    /// сторону, то в другую — жертва топчется и шатается, прикрывая лицо.
+    ///
+    /// Толчки идут через AddForceToBodyPart, а он рассылает RPC всем. Значит, качание
+    /// видят и те, у кого мода нет: для них это единственная заметная часть эффекта.
+    /// Сила маленькая нарочно — задача пошатнуть, а не повалить.
+    /// </summary>
+    private void Wobble(Character victim, BlindState st)
+    {
+        if (_wobbleForce.Value <= 0.01f || victim == null) return;
+        if (Time.time < st.nextWobbleAt) return;
+        st.nextWobbleAt = Time.time + Mathf.Max(0.1f, _wobbleEvery.Value);
+        st.wobbleSide = -st.wobbleSide;
+
+        try
+        {
+            var rig = victim.GetBodypartRig(BodypartType.Torso);
+            if (rig == null) rig = victim.GetBodypartRig(BodypartType.Head);
+            if (rig == null) return;
+
+            // Вбок относительно того, кто светит: так шатание читается как реакция
+            // на источник света, а не как случайный тычок.
+            var me = Character.localCharacter;
+            Vector3 toMe = me != null ? (me.Center - victim.Center) : Vector3.forward;
+            toMe.y = 0f;
+            Vector3 side = Vector3.Cross(Vector3.up, toMe.sqrMagnitude > 1e-4f ? toMe.normalized : Vector3.forward);
+            Vector3 push = (side * st.wobbleSide + Vector3.up * 0.25f).normalized * _wobbleForce.Value;
+
+            victim.AddForceToBodyPart(rig, push, Vector3.zero);
+        }
+        catch (System.Exception e) { Log.LogWarning($"Качание: {e.Message}"); }
+    }
+
+    /// <summary>
+    /// «Отпустило»: короткий встряс в момент, когда луч ушёл. Нужен, чтобы конец
+    /// эффекта тоже читался — иначе жертва просто мгновенно возвращается в строй,
+    /// и со стороны непонятно, что вообще закончилось.
+    /// </summary>
+    private void ShakeOff(Character victim)
+    {
+        if (_shakeOffForce.Value <= 0.01f || victim == null) return;
+        try
+        {
+            var rig = victim.GetBodypartRig(BodypartType.Head);
+            if (rig == null) return;
+            Vector3 dir = (Vector3.up * 0.7f + UnityEngine.Random.insideUnitSphere * 0.5f).normalized;
+            victim.AddForceToBodyPart(rig, dir * _shakeOffForce.Value, Vector3.zero);
+        }
+        catch (System.Exception e) { Log.LogWarning($"Встряс: {e.Message}"); }
+    }
+
     private void FlinchHead(Character victim)
     {
         if (!_flinch.Value || victim == null) return;
@@ -1838,7 +1921,12 @@ public partial class Plugin : BaseUnityPlugin
             Vector3 dir = me != null ? (victim.Center - me.Center) : Vector3.forward;
             dir.y = 0f;
             dir = (dir.sqrMagnitude > 1e-4f ? dir.normalized : Vector3.forward) + Vector3.up * 0.6f;
-            victim.AddForceToBodyPart(rig, dir.normalized * _flinchForce.Value, Vector3.zero);
+            // Голову дёргаем заметно, всё тело — слабо: со стороны это читается как
+            // «отшатнулся», а не «улетел». Оба импульса уходят одним RPC на всех,
+            // поэтому отшатывание видит и игрок без мода.
+            victim.AddForceToBodyPart(rig,
+                                      dir.normalized * _flinchForce.Value,
+                                      dir.normalized * _staggerForce.Value);
         }
         catch (System.Exception e) { Log.LogWarning($"FlinchHead: {e.Message}"); }
     }
@@ -2071,8 +2159,55 @@ public partial class Plugin : BaseUnityPlugin
         }
 
         FlinchHead(victim);
+        PlayBlindSfx(victim);
         Log.LogInfo($"Blind begin on {victim.name} (всего целей: {_blinds.Count})");
         return st;
+    }
+
+    /// <summary>
+    /// Звук попадания — берём готовый из самой игры, по имени из настройки.
+    /// Своих звуков в пакете нет нарочно: чужая озвучка выбивается из игры, а у PEAK
+    /// все SFX лежат ScriptableObject'ами и доступны по имени. Имя подбирается на глаз
+    /// по списку, который печатает клавиша N.
+    ///
+    /// Звук локальный: его слышат только те, у кого стоит мод. Сетевого способа
+    /// проиграть произвольный звук у игры нет.
+    /// </summary>
+    private void PlayBlindSfx(Character victim)
+    {
+        string want = _blindSfx.Value;
+        if (string.IsNullOrWhiteSpace(want) || victim == null) return;
+        try
+        {
+            var sfx = FindSfx(want);
+            if (sfx == null) { Log.LogWarning($"Звук '{want}' не найден — список печатает клавиша N."); return; }
+            sfx.Play(victim.Center);
+        }
+        catch (System.Exception e) { Log.LogWarning($"Звук попадания: {e.GetType().Name}: {e.Message}"); }
+    }
+
+    private static SFX_Instance? _sfxCache;
+    private static string _sfxCacheName = "";
+    private static SFX_Instance? FindSfx(string name)
+    {
+        if (_sfxCache != null && _sfxCacheName == name) return _sfxCache;
+        foreach (var s in Resources.FindObjectsOfTypeAll<SFX_Instance>())
+        {
+            if (s == null || s.name != name) continue;
+            _sfxCache = s; _sfxCacheName = name; return s;
+        }
+        return null;
+    }
+
+    /// <summary>Отладка: печатает имена всех звуков игры — чтобы выбрать для BlindSfxName.</summary>
+    private void DumpSfx()
+    {
+        var all = Resources.FindObjectsOfTypeAll<SFX_Instance>();
+        var names = new List<string>();
+        foreach (var s in all) if (s != null) names.Add(s.name);
+        names.Sort();
+        Log.LogWarning($"[N] === звуки игры ({names.Count} шт.), имя вписывать в Emote/BlindSfxName ===");
+        foreach (var n in names) Log.LogInfo($"  sfx='{n}'");
     }
 
     private void TickBlind()
@@ -2100,6 +2235,8 @@ public partial class Plugin : BaseUnityPlugin
                 continue;
             }
 
+            Wobble(victim, st);
+
             var cc = victim.GetComponentInChildren<CharacterCustomization>();
             if (cc != null)
             {
@@ -2117,16 +2254,40 @@ public partial class Plugin : BaseUnityPlugin
                 // Поэтому КАЖДЫЙ кадр заново ставим то же состояние на тот же кадр клипа.
                 // Плюс держим флаг "Emote": штатный Update игры гасит его через 2 секунды.
                 var an = cc.PlayerAnimator;
-                if (an != null && !string.IsNullOrEmpty(st.emoteState) &&
+
+                // Чередование эмоутов. Замершая поза со стороны читается как зависший
+                // персонаж. Если задан второй эмоут, вместо удержания одного кадра
+                // проигрываем по очереди «руки к лицу» и «нет-нет» — жертва закрывается
+                // и отмахивается от света. PlayEmote идёт RpcTarget.All, поэтому это
+                // единственная часть зрелища, которую видят и игроки БЕЗ мода.
+                // Чередуем не ВЫЗОВЫ эмоута, а то, какое состояние удерживаем.
+                // Повторный PlayEmote на чужом персонаже не срабатывает — проверено
+                // на боте: поза пропадала совсем, руки опускались.
+                bool swapping = _emoteSwapEvery.Value > 0.05f && !string.IsNullOrEmpty(_emoteB.Value);
+                if (swapping && Time.time >= st.nextEmoteAt)
+                {
+                    st.nextEmoteAt = Time.time + _emoteSwapEvery.Value;
+                    st.emoteOnB = !st.emoteOnB;
+                }
+                string pinState = (swapping && st.emoteOnB) ? _emoteB.Value : st.emoteState;
+
+                if (an != null && !string.IsNullOrEmpty(pinState) &&
                     Time.time - st.emoteStarted >= _poseFreezeDelay.Value)
                 {
                     an.speed = 1f;
                     an.SetBool("Emote", true);
-                    an.Play(st.emoteState, 0, Mathf.Clamp01(_poseFreezeAt.Value));
+
+                    // Кадр клипа не фиксируем намертво, а водим вокруг заданного:
+                    // руки у лица шевелятся, и со стороны это живая реакция, а не статуя.
+                    float frac = Mathf.Clamp01(_poseFreezeAt.Value
+                                               + _poseSwing.Value * Mathf.Sin(Time.time * _poseSwingSpeed.Value));
+                    an.Play(pinState, 0, frac);
+
                     if (!st.posePinned)
                     {
                         st.posePinned = true;
-                        Log.LogInfo($"Поза '{victim.name}' удерживается: кадр {_poseFreezeAt.Value:0.00}");
+                        Log.LogInfo($"Поза '{victim.name}': кадр {_poseFreezeAt.Value:0.00} ± {_poseSwing.Value:0.00}" +
+                                    (swapping ? $", чередование с '{_emoteB.Value}' каждые {_emoteSwapEvery.Value:0.0} с" : ""));
                     }
                 }
             }
@@ -2169,6 +2330,8 @@ public partial class Plugin : BaseUnityPlugin
     {
         if (victim == null || !_blinds.TryGetValue(victim, out var st)) return;
         _blinds.Remove(victim);
+
+        ShakeOff(victim);   // третий такт: видно, что отпустило
 
         var cc = victim.GetComponentInChildren<CharacterCustomization>();
         if (cc != null) cc.forcePresetEyes = st.forcePrev;      // вернуть обычные глаза
