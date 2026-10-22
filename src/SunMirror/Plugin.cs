@@ -164,7 +164,8 @@ public partial class Plugin : BaseUnityPlugin
         _drowsyAmount  = Config.Bind("Effect", "DrowsyAmount", 0.4f, "Кол-во Drowsy.");
         _glareStrength = Config.Bind("Effect", "GlareStrength", 0.75f, "Сила засвета экрана, когда светят в тебя (0..1).");
         _useEmote      = Config.Bind("Emote", "UseEmote", true, "Эмоут-реакция перед станом.");
-        _emoteName     = Config.Bind("Emote", "EmoteName", "ну хватит", "Имя эмоута — русское или английское.");
+        _emoteName     = Config.Bind("Emote", "EmoteName", "Defeat",
+            "Имя эмоута ослепления. Берите английский ключ из списка по клавише N (Defeat, Nono, Wave...), а НЕ локализованную подпись: локализованная зависит от языка игры и у английского игрока не сопоставится.");
         _stunDelay     = Config.Bind("Emote", "StunDelaySeconds", 5f, "Секунд светить в глаза до падения (эмоут+звёздочки всё это время).");
         _blindHoldSeconds = Config.Bind("Emote", "BlindHoldSeconds", 6f, "Сколько держится ослепление после попадания зайчика в глаза.");
         _poseFreezeDelay = Config.Bind("Emote", "PoseFreezeDelay", 0.55f, "Через сколько секунд после начала эмоута заморозить позу (руки у глаз).");
@@ -1711,6 +1712,16 @@ public partial class Plugin : BaseUnityPlugin
         if (anims == null) return;
         var data = FindEmote(wantedName);
         string anim = data != null && !string.IsNullOrEmpty(data.anim) ? data.anim : wantedName;
+
+        // Молчаливый откат на само введённое имя — ловушка: если в настройке стоит
+        // локализованная подпись (а она зависит от языка игры), сопоставление не
+        // срабатывает, в аниматор уходит текст вроде «сколько можно», состояния с
+        // таким именем нет, и поза просто не проигрывается. Со стороны выглядит
+        // как «мод не работает», а в логе до этого не было ни слова.
+        if (data == null && !anim.StartsWith("A_Scout_Emote_"))
+            Log.LogWarning($"Эмоут '{wantedName}' не найден. В Emote/EmoteName нужен английский ключ " +
+                           $"(Defeat, Nono, Wave — список печатает клавиша N), а не локализованная подпись. " +
+                           $"Позы не будет.");
 
         // ВАЖНО: играть эмоут нужно ТОЛЬКО через PlayEmote и ТОЛЬКО именем состояния аниматора.
         // RPCA_PlayRemove внутри делает две вещи: animator.SetBool("Emote", true) и Play(state).
