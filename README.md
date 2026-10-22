@@ -64,3 +64,11 @@ glare — like a real signal mirror.
 Built with [PEAKLib](https://github.com/PEAKModding/PEAKLib) and BepInEx.
 No third-party models or textures are bundled: everything is either generated at runtime
 or reused from the game's own assets.
+
+## Feedback
+
+Something broken, or an idea? Open an issue:
+**https://github.com/romatstrv-stack/SunMirror/issues**
+
+Thunderstore has no comments, so that repo is the only place I can hear you.
+Bug reports with your `BepInEx/LogOutput.log` attached are the most useful.

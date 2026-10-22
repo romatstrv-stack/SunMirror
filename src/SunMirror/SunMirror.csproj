@@ -8,7 +8,7 @@
     <!-- This is the display name of your mod. -->
     <AssemblyTitle>SunMirror</AssemblyTitle>
     <!-- The version number for your assembly, BepInEx plugin, and Thunderstore package. -->
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
   </PropertyGroup>
 
   <!-- ThunderPipe properties -->
@@ -23,6 +23,7 @@
       Communities: https://thunderstore.io/api/experimental/community/
       Categories: https://thunderstore.io/api/experimental/community/peak/category/
     -->
+    <ThunderstoreWebsite>https://github.com/romatstrv-stack/SunMirror</ThunderstoreWebsite>
     <ThunderstoreCommunities>peak</ThunderstoreCommunities>
     <ThunderstoreCategories>mods</ThunderstoreCategories>
   </PropertyGroup>
