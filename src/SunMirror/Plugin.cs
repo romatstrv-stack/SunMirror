@@ -252,8 +252,11 @@ public partial class Plugin : BaseUnityPlugin
             "Какую долю клипа гонять по кругу, начиная с PoseFreezeAt. Весь клип (1.0) опускает руки в конце — поэтому берём только участок, где руки у лица.");
         _mirrorItemName = Config.Bind("Model", "MirrorItemName", "Frisbee",
             "Английское имя предмета-зеркала (Item.UIData.itemName). Зайчик работает только когда этот предмет реально в руках.");
-        _sfxFilter = Config.Bind("Emote", "SfxAuditionFilter", "bonk",
-            "Подбор звука: клавиша . проигрывает следующий звук игры, чьё имя содержит эту подстроку; клавиша , повторяет текущий. Понравившееся имя вписать в BlindSfxName.");
+        // Набор отобран по каталогу из 885 звуков игры (клавиша N), в порядке
+        // убывания пригодности: тематические -> звонкие -> «застыл» -> шуточные -> голос.
+        _sfxFilter = Config.Bind("Emote", "SfxAuditionFilter",
+            "sunspray|badgepopup|amulet|jingle|ping|petrify|curse|morale|banana|airhorn|uhhh|scoutshonor",
+            "Подбор звука: клавиша . проигрывает следующего кандидата, , повторяет текущего. Несколько подстрок через '|', кандидаты идут в этом порядке. Понравившееся имя вписать в BlindSfxName.");
         _showModel     = Config.Bind("Model", "ShowModel", true, "Показывать модель зеркала в руке.");
         _targetSize    = Config.Bind("Model", "BaseSize", 0.3f, "Габарит модели (метры).");
         _heldScale     = Config.Bind("Model", "HeldScale", 1f, "Множитель масштаба.");
@@ -2385,16 +2388,27 @@ public partial class Plugin : BaseUnityPlugin
         {
             _sfxFilterUsed = filter;
             _sfxCandidates.Clear();
-            string f = filter;
-            foreach (var sfx in Resources.FindObjectsOfTypeAll<SFX_Instance>())
+
+            // Фильтр — несколько подстрок через '|'. Кандидаты идут В ПОРЯДКЕ этих
+            // подстрок, а не по алфавиту: так отобранный набор слушается осмысленно,
+            // от самого подходящего к самому дальнему, а не вперемешку.
+            var terms = (filter ?? "").Split('|');
+            var all = Resources.FindObjectsOfTypeAll<SFX_Instance>();
+            foreach (var raw in terms)
             {
-                if (sfx == null || sfx.name == null) continue;
-                if (f.Length > 0 && sfx.name.IndexOf(f, System.StringComparison.OrdinalIgnoreCase) < 0) continue;
-                if (!_sfxCandidates.Contains(sfx.name)) _sfxCandidates.Add(sfx.name);
+                string t = raw.Trim();
+                var group = new List<string>();
+                foreach (var sfx in all)
+                {
+                    if (sfx == null || sfx.name == null) continue;
+                    if (t.Length > 0 && sfx.name.IndexOf(t, System.StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (!group.Contains(sfx.name) && !_sfxCandidates.Contains(sfx.name)) group.Add(sfx.name);
+                }
+                group.Sort();
+                _sfxCandidates.AddRange(group);
             }
-            _sfxCandidates.Sort();
             _sfxPick = -1;
-            Log.LogWarning($"[звук] по фильтру '{f}' найдено {_sfxCandidates.Count}: " +
+            Log.LogWarning($"[звук] по фильтру '{filter}' найдено {_sfxCandidates.Count}: " +
                            string.Join(", ", _sfxCandidates));
             if (_sfxCandidates.Count == 0)
             {
