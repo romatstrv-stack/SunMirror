@@ -236,8 +236,8 @@ public partial class Plugin : BaseUnityPlugin
             "Второй эмоут, с которым чередуется основной: жертва то закрывается руками, то отмахивается. Пусто — держать одну позу, как раньше. Список имён печатает клавиша N.");
         _emoteSwapEvery = Config.Bind("Emote", "EmoteSwapSeconds", 0f,
             "Как часто чередовать позу со вторым эмоутом. 0 — не чередовать (по умолчанию: имя второго состояния в бою не проверено, а при опечатке поза пропадала бы через раз).");
-        _blindSfx      = Config.Bind("Emote", "BlindSfxName", "",
-            "Имя звука игры, который играть при попадании в глаза. Пусто — без звука. Список доступных имён печатает клавиша N.");
+        _blindSfx      = Config.Bind("Emote", "BlindSfxName", "synth:bell",
+            "Звук при попадании в глаза. Пусто — без звука. Свои варианты: synth:bell, synth:shing, synth:sparkle, synth:wobble, synth:zap, synth:hum. Можно подставить и звук игры — список печатает клавиша N.");
         // Нативное ослепление игры рисует СВОЮ пелену на весь экран (IllegalScreenEffect, статус "BLIND").
         // Чужому игроку это и нужно — он без мода, иначе не почувствует ничего. А себе — нет:
         // именно эта пелена и была «туманом», который не снимался ни слоями [O], ни клавишей U.
@@ -2459,7 +2459,14 @@ public partial class Plugin : BaseUnityPlugin
     private SFX_Instance? SynthSfx(string preset)
     {
         preset = preset.Trim().ToLowerInvariant();
-        if (_synthCache.TryGetValue(preset, out var cached) && cached != null) return cached;
+        if (_synthCache.TryGetValue(preset, out var cached) && cached != null)
+        {
+            // Экземпляр кэширован, а громкость с высотой правятся в конфиге на ходу —
+            // перечитываем их здесь. Иначе правка SynthVolume молча ничего не делала бы.
+            cached.settings.volume = Mathf.Clamp01(_synthVolume.Value);
+            cached.settings.pitch = _synthPitch.Value;
+            return cached;
+        }
 
         var clip = BuildSynthClip(preset);
         if (clip == null)
