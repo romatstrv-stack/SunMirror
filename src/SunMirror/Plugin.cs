@@ -111,6 +111,11 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _maxBlind = null!;
     private ConfigEntry<float> _cooldown = null!;
     private ConfigEntry<bool> _eyesOnly = null!;
+    private ConfigEntry<bool> _poseLoop = null!;
+    private ConfigEntry<float> _reactionEvery = null!;
+    private readonly Dictionary<int, float> _reactionAt = new();
+    private ConfigEntry<float> _poseLoopSpeed = null!, _poseLoopSpan = null!;
+    private ConfigEntry<string> _mirrorItemName = null!, _sfxFilter = null!;
     private ConfigEntry<float> _eyesRadius = null!;
     private ConfigEntry<float> _flinchForce = null!;
     private ConfigEntry<float> _wobbleForce = null!, _wobbleEvery = null!, _shakeOffForce = null!, _staggerForce = null!;
@@ -181,13 +186,24 @@ public partial class Plugin : BaseUnityPlugin
         if (_autoJoinRoom.Value) StartCoroutine(AutoJoinLoop());
         _selfTarget    = Config.Bind("Debug", "SelfTarget", false, "Луч всегда бьёт в тебя — тест эффекта без второго игрока (клавиша J).");
         _blindOn       = Config.Bind("Emote", "BlindStars", true, "Ослепление со звёздочками над головой (Affliction_Blind).");
-        _blindAfflictionSeconds = Config.Bind("Emote", "BlindAfflictionSeconds", 2.5f, "Мин. длительность нативного Affliction_Blind за одно обновление (сетевое, видно всем).");
+        // Было 2.5 с: у игрока БЕЗ мода пелена висела ещё две с половиной секунды
+        // после ухода луча. Для «без луча глаза открыты» это и есть главный виновник,
+        // потому что именно эту пелену видит ванильный игрок.
+        _blindAfflictionSeconds = Config.Bind("Emote", "BlindAfflictionSeconds", 0.6f,
+            "Мин. длительность нативного Affliction_Blind за одно обновление (сетевое, видно всем). Это же задаёт, насколько эффект переживает уход луча у игроков без мода.");
+        _reactionEvery = Config.Bind("Emote", "ReactionEverySeconds", 1.2f,
+            "Как часто повторять удар головой и звук при непрерывном ослеплении. Защита от «пулемёта» при поводке луча по лицу.");
         _netSendEvery = Config.Bind("Emote", "NetSendEverySeconds", 0.25f, "Как часто слать ослепление по сети, пока луч на цели (каждый кадр — флуд).");
         _flinch = Config.Bind("Emote", "VanillaFlinch", true, "Отдёргивание головы при попадании. Единственное, что физически чувствует игрок БЕЗ мода: сетевой метод самой игры.");
         _signalGrow = Config.Bind("Spot", "SignalGrowPerMeter", 0.02f, "Насколько вспышка на зеркале растёт с каждым метром — чтобы её было видно издалека.");
         _signalMax = Config.Bind("Spot", "SignalMaxSize", 3.5f, "Потолок размера вспышки. Без него на дальней дистанции зеркало заслоняет пол-экрана.");
         _maxBlind = Config.Bind("Emote", "MaxBlindSeconds", 5f, "Потолок непрерывного ослепления. Дольше держать нельзя: иначе зеркалом можно просто выключить человека из игры.");
-        _beamLinger = Config.Bind("Emote", "BeamLingerSeconds", 3f, "Сколько ослепление держится после того, как луч ушёл с глаз. Он же задаёт, скольких можно держать разом, проводя лучом по группе.");
+        // Было 3 с: глаза оставались спиральными ещё долго после ухода луча.
+        // Теперь ровно столько, чтобы перекрыть паузу между сетевыми посылками
+        // (NetSendEverySeconds) — иначе эффект мигал бы на чужих клиентах.
+        // Меньше 0.3 ставить нельзя по той же причине.
+        _beamLinger = Config.Bind("Emote", "BeamLingerSeconds", 0.4f,
+            "Сколько ослепление держится после ухода луча с глаз. Держит эффект между сетевыми посылками, поэтому должно быть больше NetSendEverySeconds (0.25).");
         _cooldown = Config.Bind("Emote", "CooldownSeconds", 4f, "Пауза, в течение которой ту же цель ослепить нельзя. Защита от удержания в цикле.");
         _eyesOnly = Config.Bind("Emote", "EyesOnly", true,
             "Слепить только при попадании в голову. Выключить — слепит попадание в любую часть тела, как было в 0.1.3.");
@@ -220,6 +236,19 @@ public partial class Plugin : BaseUnityPlugin
             "Насколько водить кадр позы туда-обратно вокруг PoseFreezeAt. 0 — застывшая поза, как было. Это и даёт движение рук у лица.");
         _poseSwingSpeed = Config.Bind("Emote", "PoseSwingSpeed", 4.5f,
             "Скорость этого покачивания позы.");
+        // Замершая поза со стороны читается как зависший персонаж — это была главная
+        // претензия к виду снаружи. Поэтому по умолчанию клип не держим на кадре,
+        // а гоняем по кругу: жертва жмурится всё время, пока луч в глазах.
+        _poseLoop = Config.Bind("Emote", "PoseLoop", true,
+            "Проигрывать эмоут по кругу всё время ослепления. Выключить — держать один кадр (PoseFreezeAt), как было в 0.1.3.");
+        _poseLoopSpeed = Config.Bind("Emote", "PoseLoopSpeed", 0.6f,
+            "Скорость прокрутки эмоута по кругу. Больше — быстрее жмурится.");
+        _poseLoopSpan = Config.Bind("Emote", "PoseLoopSpan", 0.3f,
+            "Какую долю клипа гонять по кругу, начиная с PoseFreezeAt. Весь клип (1.0) опускает руки в конце — поэтому берём только участок, где руки у лица.");
+        _mirrorItemName = Config.Bind("Model", "MirrorItemName", "Frisbee",
+            "Английское имя предмета-зеркала (Item.UIData.itemName). Зайчик работает только когда этот предмет реально в руках.");
+        _sfxFilter = Config.Bind("Emote", "SfxAuditionFilter", "bonk",
+            "Подбор звука: клавиша . проигрывает следующий звук игры, чьё имя содержит эту подстроку; клавиша , повторяет текущий. Понравившееся имя вписать в BlindSfxName.");
         _showModel     = Config.Bind("Model", "ShowModel", true, "Показывать модель зеркала в руке.");
         _targetSize    = Config.Bind("Model", "BaseSize", 0.3f, "Габарит модели (метры).");
         _heldScale     = Config.Bind("Model", "HeldScale", 1f, "Множитель масштаба.");
@@ -452,6 +481,8 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[Key.U].wasPressedThisFrame) EmergencyUnstick();   // застрял (старый баг) — отлипнуть
         if (kb[Key.P].wasPressedThisFrame) DebugBoardFlight();  // сразу вылететь на остров (отладка)
         if (kb[Key.M].wasPressedThisFrame) DebugNoon();
+        if (kb[Key.Period].wasPressedThisFrame) AuditionSfx(true);    // следующий звук-кандидат
+        if (kb[Key.Comma].wasPressedThisFrame)  AuditionSfx(false);   // повторить текущий
         if (kb[Key.F11].wasPressedThisFrame) DebugSpawnBot();  // бот рядом — цель для теста сети
         if (kb[Key.F12].wasPressedThisFrame) DebugKillVictim();  // убить ослеплённого — проверка уборки
         if (kb[Key.F6].wasPressedThisFrame) DebugJoinTestRoom(); // свести два клиента в одну комнату Photon
@@ -820,7 +851,10 @@ public partial class Plugin : BaseUnityPlugin
             }
         }
         _cloneGo = held;
-        _holdingMirror = held != null;
+        // БАГ 0.1.3: _holdingMirror = (найден объект "Frisbee" в сцене). Тарелочка,
+        // лежащая на земле или в руках у соседа, — тоже такой объект, поэтому зайчик
+        // светил с пустыми руками. Спрашиваем у игры, что держит ИМЕННО наш персонаж.
+        _holdingMirror = IsMirrorInHands();
         if (held != null) MakeCoverMirrored(held.transform);
 
         if (Time.time - _lastHoldLog > 3f)
@@ -2227,8 +2261,12 @@ public partial class Plugin : BaseUnityPlugin
         {
             PlayVictimEmote(victim, _emoteName.Value);
             st.emoteStarted = Time.time;
-            st.emoteState = _emoteState;
         }
+        // Состояние позы переносим ВСЕГДА, даже когда эмоут не переигрывали.
+        // Иначе после короткого перерыва луча (а он теперь гаснет за 0.4 с) поза
+        // пропадала бы совсем на все 4 секунды защиты от переигрывания:
+        // спиральные глаза есть, а руки опущены.
+        st.emoteState = _emoteState;
 
         // Фиксируем направление взгляда — только своей камере.
         if (victim == Character.localCharacter)
@@ -2243,9 +2281,21 @@ public partial class Plugin : BaseUnityPlugin
             if (st.mv != null) st.moveModPrev = st.mv.movementModifier;
         }
 
-        FlinchHead(victim);
-        PlayBlindSfx(victim);
-        Log.LogInfo($"Blind begin on {victim.name} (всего целей: {_blinds.Count})");
+        // Удар головой и звук — только на НАЧАЛО реакции, а не на каждый перезапуск
+        // эффекта. Луч теперь гаснет за 0.4 с, и при поводке по лицу BeginBlind
+        // срабатывал бы несколько раз в секунду: голова дёргалась бы как пулемёт,
+        // а звук превращался в треск.
+        int rkey = VictimKey(victim);
+        bool freshReaction = !_reactionAt.TryGetValue(rkey, out float ra)
+                             || Time.time - ra >= _reactionEvery.Value;
+        if (freshReaction)
+        {
+            _reactionAt[rkey] = Time.time;
+            FlinchHead(victim);
+            PlayBlindSfx(victim);
+        }
+        Log.LogInfo($"Blind begin on {victim.name} (всего целей: {_blinds.Count}" +
+                    (freshReaction ? "" : ", удар и звук пропущены — реакция уже шла") + ")");
         return st;
     }
 
@@ -2258,6 +2308,91 @@ public partial class Plugin : BaseUnityPlugin
     /// Звук локальный: его слышат только те, у кого стоит мод. Сетевого способа
     /// проиграть произвольный звук у игры нет.
     /// </summary>
+    /// <summary>
+    /// Держит ли НАШ персонаж зеркало прямо сейчас. Спрашиваем у игры
+    /// (Character.data.currentItem), а не ищем объект по имени в сцене:
+    /// тарелочка на земле или в руках у соседа — тоже объект "Frisbee",
+    /// из-за чего зайчик светил с пустыми руками.
+    /// Имя берём из Item.UIData.itemName — это английский ключ, а не
+    /// локализованная подпись, так что сравнение не поедет на другом языке.
+    /// </summary>
+    private bool IsMirrorInHands()
+    {
+        var me = Character.localCharacter;
+        if (me == null || me.data == null) return false;
+        var item = me.data.currentItem;
+        if (item == null) return false;
+
+        string want = _mirrorItemName.Value;
+        if (string.IsNullOrWhiteSpace(want)) return false;
+
+        string have = item.UIData != null ? (item.UIData.itemName ?? "") : "";
+        // UIData может быть не заполнен на отдельных предметах — тогда имя объекта.
+        if (have.Length == 0) have = item.name;
+        bool ok = have.IndexOf(want, System.StringComparison.OrdinalIgnoreCase) >= 0;
+
+        if (have != _lastItemLogged)
+        {
+            _lastItemLogged = have;
+            Log.LogInfo($"В руках: '{have}' → зеркало {(ok ? "да" : "нет")} (ищем '{want}').");
+        }
+        return ok;
+    }
+
+    private string _lastItemLogged = "";
+
+    // ---- подбор звука ослепления ----
+    private readonly List<string> _sfxCandidates = new();
+    private int _sfxPick = -1;
+    private string _sfxFilterUsed = " ";
+
+    /// <summary>
+    /// Прослушка звуков: клавиша . берёт следующий звук игры, чьё имя содержит
+    /// SfxAuditionFilter, и проигрывает его. Имена не выдумываем — список строим
+    /// из того, что реально загружено в игре, поэтому опечатка в имени невозможна.
+    /// </summary>
+    private void AuditionSfx(bool next)
+    {
+        string filter = _sfxFilter.Value ?? "";
+        // Фильтр правится в конфиге на ходу — список пересобираем, когда он сменился,
+        // иначе клавиша продолжала бы крутить кандидатов от прошлого фильтра.
+        if (_sfxCandidates.Count == 0 || filter != _sfxFilterUsed || (!next && _sfxPick < 0))
+        {
+            _sfxFilterUsed = filter;
+            _sfxCandidates.Clear();
+            string f = filter;
+            foreach (var sfx in Resources.FindObjectsOfTypeAll<SFX_Instance>())
+            {
+                if (sfx == null || sfx.name == null) continue;
+                if (f.Length > 0 && sfx.name.IndexOf(f, System.StringComparison.OrdinalIgnoreCase) < 0) continue;
+                if (!_sfxCandidates.Contains(sfx.name)) _sfxCandidates.Add(sfx.name);
+            }
+            _sfxCandidates.Sort();
+            _sfxPick = -1;
+            Log.LogWarning($"[звук] по фильтру '{f}' найдено {_sfxCandidates.Count}: " +
+                           string.Join(", ", _sfxCandidates));
+            if (_sfxCandidates.Count == 0)
+            {
+                Log.LogWarning("[звук] ничего не подошло. Полный список звуков печатает клавиша N; " +
+                               "фильтр менять в Emote/SfxAuditionFilter.");
+                return;
+            }
+        }
+
+        if (next || _sfxPick < 0) _sfxPick = (_sfxPick + 1) % _sfxCandidates.Count;
+        string name = _sfxCandidates[_sfxPick];
+        var inst = FindSfx(name);
+        var me = Character.localCharacter;
+        if (inst == null) { Log.LogWarning($"[звук] '{name}' пропал из памяти."); return; }
+        try
+        {
+            inst.Play(me != null ? me.Center : Vector3.zero);
+            Log.LogWarning($"[звук {_sfxPick + 1}/{_sfxCandidates.Count}] '{name}'  " +
+                           "(. — следующий, , — повторить; понравившийся номер скажи мне)");
+        }
+        catch (System.Exception e) { Log.LogWarning($"[звук] '{name}' не проигрался: {e.Message}"); }
+    }
+
     private void PlayBlindSfx(Character victim)
     {
         string want = _blindSfx.Value;
@@ -2362,10 +2497,15 @@ public partial class Plugin : BaseUnityPlugin
                     an.speed = 1f;
                     an.SetBool("Emote", true);
 
-                    // Кадр клипа не фиксируем намертво, а водим вокруг заданного:
-                    // руки у лица шевелятся, и со стороны это живая реакция, а не статуя.
-                    float frac = Mathf.Clamp01(_poseFreezeAt.Value
-                                               + _poseSwing.Value * Mathf.Sin(Time.time * _poseSwingSpeed.Value));
+                    // Кадр клипа не фиксируем намертво. По умолчанию гоняем участок
+                    // клипа по кругу (PingPong — вперёд-назад, без рывка на стыке):
+                    // жертва жмурится непрерывно, пока луч в глазах. Старый режим
+                    // (покачивание вокруг одного кадра) остаётся на PoseLoop=false.
+                    float frac = _poseLoop.Value
+                        ? Mathf.Clamp01(_poseFreezeAt.Value
+                                        + _poseLoopSpan.Value * Mathf.PingPong(Time.time * _poseLoopSpeed.Value, 1f))
+                        : Mathf.Clamp01(_poseFreezeAt.Value
+                                        + _poseSwing.Value * Mathf.Sin(Time.time * _poseSwingSpeed.Value));
                     an.Play(pinState, 0, frac);
 
                     if (!st.posePinned)
