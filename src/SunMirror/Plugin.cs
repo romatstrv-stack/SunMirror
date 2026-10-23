@@ -115,6 +115,7 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _reactionEvery = null!;
     private ConfigEntry<float> _chargeDrain = null!;
     private ConfigEntry<float> _synthVolume = null!, _synthPitch = null!;
+    private ConfigEntry<float> _emoteFirstHold = null!;
     // Накопленное ослепление по цели: сколько «фитиля» догорело.
     private readonly Dictionary<int, (float charge, float at)> _blindCharge = new();
     private readonly Dictionary<int, float> _reactionAt = new();
@@ -234,8 +235,14 @@ public partial class Plugin : BaseUnityPlugin
             "Встряс в момент, когда луч ушёл — чтобы конец эффекта тоже читался. 0 — выключить.");
         _emoteB        = Config.Bind("Emote", "BlindEmoteB", "A_Scout_Emote_Nono",
             "Второй эмоут, с которым чередуется основной: жертва то закрывается руками, то отмахивается. Пусто — держать одну позу, как раньше. Список имён печатает клавиша N.");
-        _emoteSwapEvery = Config.Bind("Emote", "EmoteSwapSeconds", 0f,
-            "Как часто чередовать позу со вторым эмоутом. 0 — не чередовать (по умолчанию: имя второго состояния в бою не проверено, а при опечатке поза пропадала бы через раз).");
+        _emoteSwapEvery = Config.Bind("Emote", "EmoteSwapSeconds", 1.1f,
+            "Как часто чередовать позу со вторым эмоутом. 0 — не чередовать, держать только первую позу.");
+        // Порядок важен: сначала человек закрывается руками, и только потом
+        // начинает отмахиваться. Без этой задержки чередование перекидывало на
+        // второй эмоут на ПЕРВОМ же кадре (nextEmoteAt был нулём), и жертва
+        // начинала с «no no no» — то есть отмахивалась от того, чего ещё не было.
+        _emoteFirstHold = Config.Bind("Emote", "EmoteFirstHoldSeconds", 1.5f,
+            "Сколько держать первую позу (руки к глазам), прежде чем начать чередование со вторым эмоутом. Это и задаёт порядок: сначала закрылся, потом отмахивается.");
         _blindSfx      = Config.Bind("Emote", "BlindSfxName", "synth:bell",
             "Звук при попадании в глаза. Пусто — без звука. Свои варианты: synth:bell, synth:shing, synth:sparkle, synth:wobble, synth:zap, synth:hum. Можно подставить и звук игры — список печатает клавиша N.");
         // Нативное ослепление игры рисует СВОЮ пелену на весь экран (IllegalScreenEffect, статус "BLIND").
@@ -2216,15 +2223,7 @@ public partial class Plugin : BaseUnityPlugin
                 // Character.Fall шлёт RPCA_Fall на ВСЕХ, то есть роняет и тех, у кого
                 // мода нет. Это уже не шутка, а выключение человека из игры, поэтому
                 // решение оставлено хозяину лобби, а не навязано дефолтом.
-                if (_fallAtMax.Value)
-                {
-                    try
-                    {
-                        victim.Fall(_fallSeconds.Value, _fallShake.Value);
-                        Log.LogInfo($"Падение '{victim.name}' на {_fallSeconds.Value:0.0} с (тряска {_fallShake.Value:0.0}).");
-                    }
-                    catch (System.Exception e) { Log.LogWarning($"Падение не вышло: {e.GetType().Name}: {e.Message}"); }
-                }
+                if (_fallAtMax.Value) DropVictim(victim);
 
                 RestoreBlind(victim);
                 return;
@@ -2272,6 +2271,34 @@ public partial class Plugin : BaseUnityPlugin
         _blindCharge[key] = (ChargeOf(key) + dt, Time.time);
     }
 
+    /// <summary>
+    /// Ронять жертву. Character.Fall шлёт RPCA_Fall через PhotonView, а у персонажа
+    /// без регистрации в сети (бот со стенда, ViewID = 0) RPC уходит в пустоту:
+    /// исключения нет, в лог писалось «Падение...», а персонаж стоял. Поэтому
+    /// для таких целей вызываем тот же RPCA_Fall напрямую — он всего лишь
+    /// выставляет data.fallSeconds, остальное делает штатный FixedUpdate игры.
+    /// </summary>
+    private void DropVictim(Character victim)
+    {
+        float sec = _fallSeconds.Value, shake = _fallShake.Value;
+        try
+        {
+            var view = victim.photonView;
+            if (view != null && view.ViewID != 0)
+            {
+                victim.Fall(sec, shake);
+                Log.LogInfo($"Падение '{victim.name}' на {sec:0.0} с (тряска {shake:0.0}), по сети.");
+            }
+            else
+            {
+                victim.RPCA_Fall(sec, shake);
+                Log.LogInfo($"Падение '{victim.name}' на {sec:0.0} с — локально: " +
+                            "персонаж не зарегистрирован в сети (ViewID=0), RPC ему не доставить.");
+            }
+        }
+        catch (System.Exception e) { Log.LogWarning($"Падение не вышло: {e.GetType().Name}: {e.Message}"); }
+    }
+
     private BlindState BeginBlind(Character victim)
     {
         var st = new BlindState { beganAt = Time.time };
@@ -2297,6 +2324,12 @@ public partial class Plugin : BaseUnityPlugin
             PlayVictimEmote(victim, _emoteName.Value);
             st.emoteStarted = Time.time;
         }
+        // Первое переключение — не раньше, чем через EmoteFirstHoldSeconds.
+        // Иначе TickBlind на первом же кадре видит nextEmoteAt == 0 и сразу
+        // перекидывает на второй эмоут, ломая весь порядок реакции.
+        st.nextEmoteAt = Time.time + Mathf.Max(0f, _emoteFirstHold.Value);
+        st.emoteOnB = false;
+
         // Состояние позы переносим ВСЕГДА, даже когда эмоут не переигрывали.
         // Иначе после короткого перерыва луча (а он теперь гаснет за 0.4 с) поза
         // пропадала бы совсем на все 4 секунды защиты от переигрывания:
