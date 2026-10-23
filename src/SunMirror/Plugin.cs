@@ -110,6 +110,8 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _beamLinger = null!;
     private ConfigEntry<float> _maxBlind = null!;
     private ConfigEntry<float> _cooldown = null!;
+    private ConfigEntry<bool> _eyesOnly = null!;
+    private ConfigEntry<float> _eyesRadius = null!;
     private ConfigEntry<float> _flinchForce = null!;
     private ConfigEntry<float> _wobbleForce = null!, _wobbleEvery = null!, _shakeOffForce = null!, _staggerForce = null!;
     private ConfigEntry<string> _emoteB = null!, _blindSfx = null!;
@@ -187,6 +189,10 @@ public partial class Plugin : BaseUnityPlugin
         _maxBlind = Config.Bind("Emote", "MaxBlindSeconds", 5f, "Потолок непрерывного ослепления. Дольше держать нельзя: иначе зеркалом можно просто выключить человека из игры.");
         _beamLinger = Config.Bind("Emote", "BeamLingerSeconds", 3f, "Сколько ослепление держится после того, как луч ушёл с глаз. Он же задаёт, скольких можно держать разом, проводя лучом по группе.");
         _cooldown = Config.Bind("Emote", "CooldownSeconds", 4f, "Пауза, в течение которой ту же цель ослепить нельзя. Защита от удержания в цикле.");
+        _eyesOnly = Config.Bind("Emote", "EyesOnly", true,
+            "Слепить только при попадании в голову. Выключить — слепит попадание в любую часть тела, как было в 0.1.3.");
+        _eyesRadius = Config.Bind("Emote", "EyesRadius", 0.45f,
+            "Радиус вокруг головы (в метрах), в котором попадание считается попаданием в глаза. Прямое попадание в коллайдер головы засчитывается всегда, независимо от радиуса. Меньше 0.25 — попасть почти невозможно, больше 0.6 — ловит плечи и грудь.");
         _flinchForce = Config.Bind("Emote", "VanillaFlinchForce", 14f, "Сила отдёргивания головы. Больше 30 валит персонажа — нам нужно вздрагивание, а не нокдаун.");
         // Три такта реакции. Замершая поза со стороны выглядит как зависший персонаж,
         // а PEAK — игра про потерю равновесия, в ней смешно именно шатание.
@@ -1429,12 +1435,12 @@ public partial class Plugin : BaseUnityPlugin
         {
             Vector3 reflDir = Vector3.Reflect(aim, hit.normal).normalized;
             victim = Physics.Raycast(hit.point + reflDir * 0.05f, reflDir, out RaycastHit rhit, _range.Value)
-                ? rhit.collider.GetComponentInParent<Character>() : null;
+                ? VictimFromHit(rhit, null)          // в отражении себя слепить можно
+                : null;
         }
         else
         {
-            victim = hit.collider.GetComponentInParent<Character>();
-            if (victim == me) victim = null;
+            victim = VictimFromHit(hit, me);
         }
 
         // DEBUG-режим тестирования без второго игрока: куда бы ни бил луч, целью становишься ты.
@@ -1931,6 +1937,60 @@ public partial class Plugin : BaseUnityPlugin
             victim.AddForceToBodyPart(rig, dir * _shakeOffForce.Value, Vector3.zero);
         }
         catch (System.Exception e) { Log.LogWarning($"Встряс: {e.Message}"); }
+    }
+
+    private float _lastEyesLog;
+
+    /// <summary>
+    /// Кого считать ослеплённым по этому попаданию. Зайчик слепит только тогда,
+    /// когда луч попал в глаза: пятно по телу всё равно ползёт и его видно со стороны,
+    /// но ослепление начинается, лишь когда центр луча подошёл к голове.
+    /// Проверяем геометрией от головного рига, а не типом коллайдера: пока персонаж
+    /// жив, тело в PEAK — одна капсула, типа части тела у попадания просто нет.
+    /// Дистанцию всегда пишем в лог: радиус подкручивается по этим цифрам, а не на ощупь.
+    /// </summary>
+    private Character? VictimFromHit(RaycastHit hit, Character? exclude)
+    {
+        var c = hit.collider.GetComponentInParent<Character>();
+        if (c == null || (exclude != null && c == exclude)) return null;
+        if (!_eyesOnly.Value) return c;
+
+        Rigidbody? head = null;
+        Vector3 eyes;
+        try
+        {
+            head = c.GetBodypartRig(BodypartType.Head);
+            // Точка глаз у игры своя: кость головы смещена, камера игрока сидит
+            // в GetCameraPos(0). Мерим до неё, иначе порог поедет на пол-головы.
+            eyes = c.GetCameraPos(0f);
+        }
+        catch (System.Exception e)
+        {
+            // Головы не достать — молча отбирать эффект нельзя, иначе мод «просто не работает».
+            Log.LogWarning($"Голова '{c.name}' недоступна ({e.Message}), слепим без проверки глаз.");
+            return c;
+        }
+
+        // Попали прямо в коллайдер головного рига — это глаза, геометрия не нужна.
+        if (head != null && hit.collider.attachedRigidbody == head)
+        {
+            if (Time.time - _lastEyesLog > 1f)
+            {
+                _lastEyesLog = Time.time;
+                Log.LogInfo($"Попадание по '{c.name}': коллайдер головы → в глаза, слепим.");
+            }
+            return c;
+        }
+
+        float d = Vector3.Distance(hit.point, eyes);
+        bool inEyes = d <= _eyesRadius.Value;
+        if (Time.time - _lastEyesLog > 1f)
+        {
+            _lastEyesLog = Time.time;
+            Log.LogInfo($"Попадание по '{c.name}': {d:0.00} м от глаз, порог {_eyesRadius.Value:0.00} → " +
+                        (inEyes ? "в глаза, слепим." : "в тело, не слепим."));
+        }
+        return inEyes ? c : null;
     }
 
     private void FlinchHead(Character victim)
