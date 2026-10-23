@@ -103,6 +103,7 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<bool> _flinch = null!;
     private ConfigEntry<bool> _debugKeys = null!;
     private ConfigEntry<bool> _autoJoinRoom = null!;
+    private ConfigEntry<bool> _freezeNoon = null!;
     private string? _guestUserId;   // свой Photon UserId для второго клиента на той же машине
     private ConfigEntry<float> _signalGrow = null!;
     private ConfigEntry<float> _signalMax = null!;
@@ -171,6 +172,8 @@ public partial class Plugin : BaseUnityPlugin
         _poseFreezeDelay = Config.Bind("Emote", "PoseFreezeDelay", 0.55f, "Через сколько секунд после начала эмоута заморозить позу (руки у глаз).");
         _rigAimTime    = Config.Bind("Debug", "RigAimSeconds", 1.0f, "Сколько зеркало-стенд наводит зайчика до ослепления.");
         _debugKeys = Config.Bind("Debug", "DebugKeys", false, "Отладочные клавиши (B K L J C H U N P M O F5-F12 и подстройка наклона). По умолчанию выключены: обычному игроку они не нужны.");
+        _freezeNoon    = Config.Bind("Debug", "FreezeNoon", false,
+            "Держать игровое время на полудне. Для отладки и съёмки: иначе солнце садится посреди работы и зайчик перестаёт работать.");
         _autoJoinRoom = Config.Bind("Debug", "AutoJoinHandshakeRoom", false,
             "Отладка на одной машине: при запуске сам войти в комнату, имя которой хост положил в sunmirror_room.txt (клавиша F7). Ставится только на втором клиенте.");
         if (_autoJoinRoom.Value) StartCoroutine(AutoJoinLoop());
@@ -448,6 +451,8 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[Key.F6].wasPressedThisFrame) DebugJoinTestRoom(); // свести два клиента в одну комнату Photon
         if (kb[Key.F5].wasPressedThisFrame) DebugLobbyLink();   // достать ссылку-приглашение в лобби
         if (kb[Key.F7].wasPressedThisFrame) DebugRoomHandshake(); // рукопожатие двух клиентов на одной машине
+        if (kb[Key.F4].wasPressedThisFrame) SetupTestBench();   // собрать стенд одной клавишей
+        if (kb[Key.F3].wasPressedThisFrame) DebugBlindNearest(); // ослепить ближайшего без прицеливания
         // Живая подстройка кадра позы: F9 раньше, F10 позже.
         // Config.Save() обязателен — иначе значение потеряется при следующей пересборке.
         bool poseMinus = kb[Key.F9].wasPressedThisFrame;
@@ -534,6 +539,15 @@ public partial class Plugin : BaseUnityPlugin
     // Пятно двигаем в LateUpdate — после того как камера обновилась (иначе дёргается).
     private void LateUpdate()
     {
+        // Заморозка полудня. Нужна не для игры, а для работы: пока настраиваешь
+        // сцену или пишешь ролик, игровое время уходит, солнце садится, и зайчик
+        // перестаёт работать на середине дубля. Это съело у меня несколько записей.
+        if (_freezeNoon.Value)
+        {
+            var dnf = DayNightManager.instance;
+            if (dnf != null) dnf.timeOfDay = 12f;
+        }
+
         var kb = Keyboard.current;
         var mouse = Mouse.current;
         // основной триггер — держим зеркало (есть viewmodel-клон) и жмём ЛКМ; F — debug-дубль (старый проп)
@@ -2693,6 +2707,61 @@ public partial class Plugin : BaseUnityPlugin
     /// то есть ровно тот случай, на котором ломается применение эффектов,
     /// и его можно воспроизвести без второго игрока.
     /// </summary>
+
+    /// <summary>
+    /// F4 — собрать испытательный стенд одной клавишей.
+    ///
+    /// Зачем: раньше проверка эффекта стоила пяти отдельных действий (зеркало,
+    /// полдень, бот, развернуть, прицелиться), и на каждое уходило время, а
+    /// прицеливание мышью по скриншотам промахивалось чаще, чем попадало.
+    /// Здесь всё это делается разом и без прицеливания.
+    /// </summary>
+    private void SetupTestBench()
+    {
+        Log.LogWarning("[F4] Собираю стенд: зеркало, полдень, бот.");
+        GiveBinoculars();
+        DebugNoon();
+        DebugSpawnBot();
+        Log.LogWarning("[F4] Готово. F3 — ослепить ближайшего, прицеливаться не нужно.");
+    }
+
+    /// <summary>
+    /// F3 — ослепить ближайшего персонажа, минуя луч и прицеливание.
+    ///
+    /// Нужно потому, что проверять ВИД эффекта и проверять ПОПАДАНИЕ луча —
+    /// две разные задачи, а раньше они были склеены: чтобы посмотреть на позу,
+    /// приходилось сначала попасть зайчиком в глаза. Здесь эффект применяется
+    /// тем же путём, что и при настоящем попадании (эмоут + SendBlind), только
+    /// цель выбирается по расстоянию.
+    /// </summary>
+    private void DebugBlindNearest()
+    {
+        var me = Character.localCharacter;
+        if (me == null) { Log.LogWarning("[F3] Нет своего персонажа."); return; }
+
+        Character? best = null;
+        float bestD = float.MaxValue;
+        foreach (var c in Object.FindObjectsByType<Character>(FindObjectsSortMode.None))
+        {
+            if (c == null || c == me) continue;
+            var d = c.data;
+            if (d == null || d.dead || d.fullyPassedOut) continue;
+            float dist = Vector3.Distance(c.Center, me.Center);
+            if (dist < bestD) { bestD = dist; best = c; }
+        }
+
+        if (best == null)
+        {
+            Log.LogWarning("[F3] Рядом никого нет — поставь бота клавишей F11 или F4.");
+            return;
+        }
+
+        if (_useEmote.Value && !string.IsNullOrEmpty(_emoteName.Value))
+            PlayVictimEmote(best, _emoteName.Value);
+        SendBlind(best, _beamLinger.Value);
+        Log.LogWarning($"[F3] Ослеплён '{best.name}' в {bestD:0.0} м (без луча, для проверки вида).");
+    }
+
     private void DebugSpawnBot()
     {
         var sp = Object.FindFirstObjectByType<BotSpawner>();
