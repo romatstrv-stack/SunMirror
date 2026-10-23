@@ -114,6 +114,7 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<bool> _poseLoop = null!;
     private ConfigEntry<float> _reactionEvery = null!;
     private ConfigEntry<float> _chargeDrain = null!;
+    private ConfigEntry<float> _synthVolume = null!, _synthPitch = null!;
     // Накопленное ослепление по цели: сколько «фитиля» догорело.
     private readonly Dictionary<int, (float charge, float at)> _blindCharge = new();
     private readonly Dictionary<int, float> _reactionAt = new();
@@ -196,6 +197,12 @@ public partial class Plugin : BaseUnityPlugin
             "Мин. длительность нативного Affliction_Blind за одно обновление (сетевое, видно всем). Это же задаёт, насколько эффект переживает уход луча у игроков без мода.");
         _chargeDrain = Config.Bind("Emote", "BlindChargeDrain", 0.5f,
             "Как быстро стекает накопленное ослепление, когда луч ушёл с глаз (доля от реального времени). 1.0 — стекает ровно столько же, сколько копилось; 0 — не стекает вовсе, цель запоминает всё.");
+        // Свой звук синтезируем в рантайме: ни один из 885 звуков игры не подошёл,
+        // а тащить в пакет мода аудиофайл — лишний вес и лишняя загрузка.
+        _synthVolume = Config.Bind("Emote", "SynthVolume", 0.55f,
+            "Громкость своего (синтезированного) звука.");
+        _synthPitch = Config.Bind("Emote", "SynthPitch", 1f,
+            "Высота своего звука. 0.8 — ниже и глуше, 1.3 — выше и звонче.");
         _reactionEvery = Config.Bind("Emote", "ReactionEverySeconds", 1.2f,
             "Как часто повторять удар головой и звук при непрерывном ослеплении. Защита от «пулемёта» при поводке луча по лицу.");
         _netSendEvery = Config.Bind("Emote", "NetSendEverySeconds", 0.25f, "Как часто слать ослепление по сети, пока луч на цели (каждый кадр — флуд).");
@@ -2392,8 +2399,15 @@ public partial class Plugin : BaseUnityPlugin
             // Фильтр — несколько подстрок через '|'. Кандидаты идут В ПОРЯДКЕ этих
             // подстрок, а не по алфавиту: так отобранный набор слушается осмысленно,
             // от самого подходящего к самому дальнему, а не вперемешку.
+            // Фильтр "synth" — крутим не звуки игры, а свои синтезированные.
+            bool synthOnly = (filter ?? "").Trim().Equals("synth", System.StringComparison.OrdinalIgnoreCase);
+            if (synthOnly)
+                foreach (var np in SynthPresets) _sfxCandidates.Add("synth:" + np);
+
             var terms = (filter ?? "").Split('|');
-            var all = Resources.FindObjectsOfTypeAll<SFX_Instance>();
+            var all = synthOnly
+                ? System.Array.Empty<SFX_Instance>()
+                : Resources.FindObjectsOfTypeAll<SFX_Instance>();
             foreach (var raw in terms)
             {
                 string t = raw.Trim();
@@ -2420,7 +2434,7 @@ public partial class Plugin : BaseUnityPlugin
 
         if (next || _sfxPick < 0) _sfxPick = (_sfxPick + 1) % _sfxCandidates.Count;
         string name = _sfxCandidates[_sfxPick];
-        var inst = FindSfx(name);
+        var inst = ResolveSfx(name);
         var me = Character.localCharacter;
         if (inst == null) { Log.LogWarning($"[звук] '{name}' пропал из памяти."); return; }
         try
@@ -2432,14 +2446,160 @@ public partial class Plugin : BaseUnityPlugin
         catch (System.Exception e) { Log.LogWarning($"[звук] '{name}' не проигрался: {e.Message}"); }
     }
 
+    // ======== свой звук: синтез в рантайме ========
+    // Ни один из 885 звуков игры не подошёл: все они про удар, падение или интерфейс.
+    // Поэтому собираем клип сами и оборачиваем его в SFX_Instance — тот же тип,
+    // которым пользуется игра. Благодаря этому звук идёт через штатный SFX_Player:
+    // громкость из настроек игрока, 3D-затухание по дистанции и кулдаун — даром.
+    private static readonly string[] SynthPresets =
+        { "shing", "sparkle", "bell", "wobble", "zap", "hum" };
+
+    private readonly Dictionary<string, SFX_Instance> _synthCache = new();
+
+    private SFX_Instance? SynthSfx(string preset)
+    {
+        preset = preset.Trim().ToLowerInvariant();
+        if (_synthCache.TryGetValue(preset, out var cached) && cached != null) return cached;
+
+        var clip = BuildSynthClip(preset);
+        if (clip == null)
+        {
+            Log.LogWarning($"[звук] свой вариант '{preset}' неизвестен. Есть: {string.Join(", ", SynthPresets)}");
+            return null;
+        }
+
+        var inst = ScriptableObject.CreateInstance<SFX_Instance>();
+        inst.name = "synth:" + preset;
+        inst.clips = new[] { clip };
+        inst.settings = new SFX_Settings
+        {
+            volume = Mathf.Clamp01(_synthVolume.Value),
+            volume_Variation = 0.1f,
+            pitch = _synthPitch.Value,
+            pitch_Variation = 0.08f,   // чтобы повторы не звучали как заезженная пластинка
+            spatialBlend = 1f,         // 3D: слышно с той стороны, откуда светят
+            dopplerLevel = 0f,
+            range = 150f,
+            cooldown = 0.02f
+        };
+        _synthCache[preset] = inst;
+        return inst;
+    }
+
+    private AudioClip? BuildSynthClip(string preset)
+    {
+        float len = preset switch
+        {
+            "bell" => 0.55f,
+            "wobble" => 0.45f,
+            "hum" => 0.60f,
+            "sparkle" => 0.40f,
+            "zap" => 0.18f,
+            "shing" => 0.22f,
+            _ => -1f
+        };
+        if (len < 0f) return null;
+
+        const int rate = 44100;
+        int n = (int)(rate * len);
+        var buf = new float[n];
+        var rnd = new System.Random(20261023);   // фиксированное зерно: звук одинаков каждый запуск
+
+        // искры: четыре коротких пика в разное время и на разной высоте
+        float[] spOff = { 0f, 0.07f, 0.15f, 0.24f };
+        float[] spHz = { 2600f, 3300f, 2000f, 3900f };
+
+        for (int i = 0; i < n; i++)
+        {
+            float t = i / (float)rate;
+            float u = t / len;
+            float v = 0f;
+
+            switch (preset)
+            {
+                case "shing":   // блик по глазам: быстрый свип вверх
+                {
+                    float f = 900f * Mathf.Pow(3800f / 900f, u);
+                    float env = Mathf.Exp(-u * 9f);
+                    v = (Mathf.Sin(2f * Mathf.PI * f * t) + 0.3f * Mathf.Sin(4f * Mathf.PI * f * t)) * env;
+                    break;
+                }
+                case "sparkle":
+                {
+                    for (int k = 0; k < spOff.Length; k++)
+                    {
+                        float dt = t - spOff[k];
+                        if (dt < 0f) continue;
+                        v += Mathf.Sin(2f * Mathf.PI * spHz[k] * dt) * Mathf.Exp(-dt * 40f);
+                    }
+                    v *= 0.7f;
+                    break;
+                }
+                case "bell":    // колокольчик: негармоничные призвуки, как у настоящего
+                {
+                    const float f0 = 1760f;
+                    float env = Mathf.Exp(-u * 5f);
+                    v = (Mathf.Sin(2f * Mathf.PI * f0 * t)
+                         + 0.5f * Mathf.Sin(2f * Mathf.PI * f0 * 2.76f * t)
+                         + 0.25f * Mathf.Sin(2f * Mathf.PI * f0 * 5.40f * t)) * env * 0.6f;
+                    break;
+                }
+                case "wobble":  // «поплыло в глазах»: тон с вибрато
+                {
+                    float f = 620f * (1f + 0.25f * Mathf.Sin(2f * Mathf.PI * 11f * t));
+                    float env = Mathf.Sin(Mathf.PI * u);
+                    v = Mathf.Sin(2f * Mathf.PI * f * t) * env * 0.8f;
+                    break;
+                }
+                case "zap":     // короткий электрический щёлк
+                {
+                    float noise = (float)(rnd.NextDouble() * 2.0 - 1.0);
+                    float f = 2200f * Mathf.Pow(300f / 2200f, u);
+                    float env = Mathf.Exp(-u * 25f);
+                    v = (noise * 0.5f + Mathf.Sin(2f * Mathf.PI * f * t)) * env;
+                    break;
+                }
+                case "hum":     // низкий гул с нарастанием
+                {
+                    float env = Mathf.Sin(Mathf.PI * u);
+                    v = (Mathf.Sin(2f * Mathf.PI * 170f * t)
+                         + 0.4f * Mathf.Sin(2f * Mathf.PI * 340f * t)) * env * 0.7f;
+                    break;
+                }
+            }
+
+            // Срез на концах: без него щелчок на старте и обрыве слышен сильнее самого звука.
+            float fadeIn = Mathf.Clamp01(t / 0.003f);
+            float fadeOut = Mathf.Clamp01((len - t) / 0.005f);
+            buf[i] = Mathf.Clamp(v * fadeIn * fadeOut, -1f, 1f);
+        }
+
+        var clip = AudioClip.Create("sm_" + preset, n, 1, rate, false);
+        clip.SetData(buf, 0);
+        return clip;
+    }
+
+    /// <summary>Звук по имени: "synth:shing" — наш синтезированный, иначе ищем среди звуков игры.</summary>
+    private SFX_Instance? ResolveSfx(string name)
+    {
+        if (name.StartsWith("synth:", System.StringComparison.OrdinalIgnoreCase))
+            return SynthSfx(name.Substring(6));
+        return FindSfx(name);
+    }
+
     private void PlayBlindSfx(Character victim)
     {
         string want = _blindSfx.Value;
         if (string.IsNullOrWhiteSpace(want) || victim == null) return;
         try
         {
-            var sfx = FindSfx(want);
-            if (sfx == null) { Log.LogWarning($"Звук '{want}' не найден — список печатает клавиша N."); return; }
+            var sfx = ResolveSfx(want);
+            if (sfx == null)
+            {
+                Log.LogWarning($"Звук '{want}' не найден. Список звуков игры печатает клавиша N; " +
+                               $"свои варианты: synth:{string.Join(", synth:", SynthPresets)}");
+                return;
+            }
             sfx.Play(victim.Center);
         }
         catch (System.Exception e) { Log.LogWarning($"Звук попадания: {e.GetType().Name}: {e.Message}"); }
