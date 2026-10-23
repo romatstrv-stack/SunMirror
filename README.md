@@ -2,6 +2,8 @@
 
 Catch the sun with a frisbee and blind your teammate with the reflection.
 
+![Sun Mirror in action](https://raw.githubusercontent.com/romatstrv-stack/SunMirror/master/media/sunmirror-demo.gif)
+
 Pick up a frisbee, hold left mouse button, and a bright spot of sunlight crawls across
 whatever you point at. Walk it up a teammate's body to their eyes and they get dazzled:
 hands up over the face, frozen in that pose, spiral eyes, dazed mouth, unable to move
