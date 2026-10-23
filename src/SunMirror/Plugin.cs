@@ -113,6 +113,9 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<bool> _eyesOnly = null!;
     private ConfigEntry<bool> _poseLoop = null!;
     private ConfigEntry<float> _reactionEvery = null!;
+    private ConfigEntry<float> _chargeDrain = null!;
+    // Накопленное ослепление по цели: сколько «фитиля» догорело.
+    private readonly Dictionary<int, (float charge, float at)> _blindCharge = new();
     private readonly Dictionary<int, float> _reactionAt = new();
     private ConfigEntry<float> _poseLoopSpeed = null!, _poseLoopSpan = null!;
     private ConfigEntry<string> _mirrorItemName = null!, _sfxFilter = null!;
@@ -191,6 +194,8 @@ public partial class Plugin : BaseUnityPlugin
         // потому что именно эту пелену видит ванильный игрок.
         _blindAfflictionSeconds = Config.Bind("Emote", "BlindAfflictionSeconds", 0.6f,
             "Мин. длительность нативного Affliction_Blind за одно обновление (сетевое, видно всем). Это же задаёт, насколько эффект переживает уход луча у игроков без мода.");
+        _chargeDrain = Config.Bind("Emote", "BlindChargeDrain", 0.5f,
+            "Как быстро стекает накопленное ослепление, когда луч ушёл с глаз (доля от реального времени). 1.0 — стекает ровно столько же, сколько копилось; 0 — не стекает вовсе, цель запоминает всё.");
         _reactionEvery = Config.Bind("Emote", "ReactionEverySeconds", 1.2f,
             "Как часто повторять удар головой и звук при непрерывном ослеплении. Защита от «пулемёта» при поводке луча по лицу.");
         _netSendEvery = Config.Bind("Emote", "NetSendEverySeconds", 0.25f, "Как часто слать ослепление по сети, пока луч на цели (каждый кадр — флуд).");
@@ -2187,9 +2192,13 @@ public partial class Plugin : BaseUnityPlugin
 
         if (_blinds.TryGetValue(victim, out var st))
         {
-            if (_maxBlind.Value > 0f && Time.time - st.beganAt >= _maxBlind.Value)
+            // Считаем НАКОПЛЕННОЕ ослепление, а не непрерывное. Непрерывное обнулялось
+            // от каждого разрыва луча в 0.4 с — после правки «без луча глаза открыты»
+            // пять секунд подряд стали недостижимы, и падение просто не наступало.
+            if (_maxBlind.Value > 0f && ChargeOf(key) >= _maxBlind.Value)
             {
                 _cooldownUntil[key] = Time.time + Mathf.Max(0f, _cooldown.Value);
+                _blindCharge.Remove(key);     // фитиль догорел — начинаем заново
                 Log.LogInfo($"Ослепление '{victim.name}' прервано по потолку {_maxBlind.Value:0.0} с; " +
                             $"повтор не раньше чем через {_cooldown.Value:0.0} с.");
 
@@ -2235,6 +2244,22 @@ public partial class Plugin : BaseUnityPlugin
     {
         var v = c.photonView;
         return v != null && v.ViewID != 0 ? v.ViewID : c.GetInstanceID();
+    }
+
+    /// <summary>
+    /// Сколько ослепления накоплено по цели. Пока луч в глазах — растёт, после ухода
+    /// луча стекает со скоростью BlindChargeDrain. Это и есть «фитиль» до падения.
+    /// </summary>
+    private float ChargeOf(int key)
+    {
+        if (!_blindCharge.TryGetValue(key, out var c)) return 0f;
+        float idle = Mathf.Max(0f, Time.time - c.at);
+        return Mathf.Max(0f, c.charge - idle * _chargeDrain.Value);
+    }
+
+    private void AddCharge(int key, float dt)
+    {
+        _blindCharge[key] = (ChargeOf(key) + dt, Time.time);
     }
 
     private BlindState BeginBlind(Character victim)
@@ -2455,6 +2480,7 @@ public partial class Plugin : BaseUnityPlugin
                 continue;
             }
 
+            AddCharge(VictimKey(victim), Time.deltaTime);
             Wobble(victim, st);
 
             var cc = victim.GetComponentInChildren<CharacterCustomization>();
@@ -2511,7 +2537,10 @@ public partial class Plugin : BaseUnityPlugin
                     if (!st.posePinned)
                     {
                         st.posePinned = true;
-                        Log.LogInfo($"Поза '{victim.name}': кадр {_poseFreezeAt.Value:0.00} ± {_poseSwing.Value:0.00}" +
+                        Log.LogInfo($"Поза '{victim.name}': " +
+                                    (_poseLoop.Value
+                                        ? $"клип по кругу {_poseFreezeAt.Value:0.00}..{_poseFreezeAt.Value + _poseLoopSpan.Value:0.00}, скорость {_poseLoopSpeed.Value:0.0}"
+                                        : $"кадр {_poseFreezeAt.Value:0.00} ± {_poseSwing.Value:0.00}") +
                                     (swapping ? $", чередование с '{_emoteB.Value}' каждые {_emoteSwapEvery.Value:0.0} с" : ""));
                     }
                 }
