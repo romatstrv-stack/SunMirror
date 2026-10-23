@@ -7,7 +7,9 @@ whatever you point at. Walk it up a teammate's body to their eyes and they get d
 hands up over the face, frozen in that pose, spiral eyes, dazed mouth, unable to move
 or look away until you point the mirror somewhere else.
 
-Nobody falls. Nobody dies. It is a banana-peel prank, not a weapon.
+Hold the beam on their eyes for five seconds and they drop, stunned for a moment.
+Then they get up. Nobody dies, and the same target cannot be blinded again for
+four seconds — a frisbee should not be able to switch a person off.
 
 ## What the victim actually sees
 
@@ -18,6 +20,7 @@ Nobody falls. Nobody dies. It is a banana-peel prank, not a weapon.
 | Spiral eyes, dazed mouth | yes | no |
 | Frozen in place, look locked | yes | no |
 | Blinding flare on their screen | yes | no |
+| Falls over after five seconds | yes | **yes** |
 
 The pose and the flinch travel through the game's own networking, so strangers who have
 never heard of this mod still react visibly. Everything else needs the mod on their side.

@@ -8,7 +8,7 @@
     <!-- This is the display name of your mod. -->
     <AssemblyTitle>SunMirror</AssemblyTitle>
     <!-- The version number for your assembly, BepInEx plugin, and Thunderstore package. -->
-    <Version>0.1.4</Version>
+    <Version>0.1.5</Version>
   </PropertyGroup>
 
   <!-- ThunderPipe properties -->
@@ -17,7 +17,7 @@
     <IsThunderstorePackable>true</IsThunderstorePackable>
     <!-- Package name on Thunderstore. Must not contain spaces ' ' or dashes '-'. -->
     <ThunderstoreName>SunMirror</ThunderstoreName>
-    <ThunderstoreDescription>Catch the sun with a frisbee-mirror and blind a teammate: they cover their face, freeze with spiral eyes, and can't move until you look away. A friendly banana-peel prank - nobody falls, nobody dies.</ThunderstoreDescription>
+    <ThunderstoreDescription>Catch the sun with a frisbee-mirror and blind a teammate: they cover their face, freeze with spiral eyes, and can't move until you look away. Hold the beam on their eyes long enough and they drop.</ThunderstoreDescription>
     <!--
       Communities and package categories metadata for publishing with ThunderPipe.
       Communities: https://thunderstore.io/api/experimental/community/

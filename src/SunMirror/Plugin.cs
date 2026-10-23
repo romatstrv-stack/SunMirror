@@ -170,8 +170,8 @@ public partial class Plugin : BaseUnityPlugin
         _requireSun    = Config.Bind("Spot", "RequireSunlight", true, "Светить только когда солнце падает на игрока (день и не в тени).");
         _fallSeconds   = Config.Bind("Effect", "FallSeconds", 1.6f, "Секунд рэгдолла.");
         _fallShake     = Config.Bind("Effect", "FallShake", 0.6f, "Тряска экрана.");
-        _fallAtMax     = Config.Bind("Emote", "FallAtMaxBlind", false,
-            "Ронять цель в конце ослепления (по потолку MaxBlindSeconds). Выключено по умолчанию: падение летит штатным RPC игры и валит даже тех, у кого мода нет.");
+        _fallAtMax     = Config.Bind("Emote", "FallAtMaxBlind", true,
+            "Ронять цель, когда накопится MaxBlindSeconds ослепления. Падение летит штатным RPC игры, поэтому валит и тех, у кого мода нет. Выключить, если в лобби это лишнее.");
         _applyStatuses = Config.Bind("Effect", "ApplyStatuses", false, "Spores/Drowsy (на незнакомцах может не сработать).");
         _sporesAmount  = Config.Bind("Effect", "SporesAmount", 0.5f, "Кол-во Spores.");
         _drowsyAmount  = Config.Bind("Effect", "DrowsyAmount", 0.4f, "Кол-во Drowsy.");
