@@ -114,6 +114,8 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<bool> _poseLoop = null!;
     private ConfigEntry<float> _reactionEvery = null!;
     private ConfigEntry<float> _chargeDrain = null!;
+    private ConfigEntry<float> _lightReach = null!;
+    private ConfigEntry<float> _flashEmission = null!, _flashPulse = null!, _flashPulseSpeed = null!;
     private ConfigEntry<float> _synthVolume = null!, _synthPitch = null!;
     private ConfigEntry<float> _emoteFirstHold = null!;
     // Накопленное ослепление по цели: сколько «фитиля» догорело.
@@ -162,6 +164,12 @@ public partial class Plugin : BaseUnityPlugin
         _spread        = Config.Bind("Spot", "SpreadPerMeter", 0.009f, "Прибавка к диаметру на метр (рассеяние). 0.009 — настоящая расходимость солнечного зайчика: угловой размер Солнца 0,53 градуса даёт ~9 мм на метр. На 60 м пятно около метра.");
         _spotGlow      = Config.Bind("Spot", "Glow", 14f, "Яркость прожектора.");
         _heightFactor  = Config.Bind("Spot", "HeightFactor", 2f, "Высота источника = размер×это (больше = мягче край).");
+        // Насколько прожектор добивает ЗА поверхность, куда попал зайчик.
+        // Раньше запас был «размер + 0.5 м»: на песке он уходил под землю и был незаметен,
+        // а стоило навести луч на лицо — за поверхностью оказывалась стена, и на ней
+        // загоралось второе, паразитное пятно. Теперь запас маленький и не зависит от размера.
+        _lightReach    = Config.Bind("Spot", "LightReachBeyond", 0.3f,
+            "На сколько метров прожектор светит за поверхность попадания. Больше — мягче край пятна, но начинает подсвечивать то, что стоит за целью.");
         _smooth        = Config.Bind("Spot", "SmoothSpeed", 22f, "Сглаживание хода пятна (больше = резче/быстрее).");
         _showSprite    = Config.Bind("Spot", "ShowSprite", true, "Яркий спрайт в центре пятна.");
         _spriteBright  = Config.Bind("Spot", "SpriteBrightness", 2.4f, "Яркость зайчика. Больше 1 — уходит в пересвет и ловит блум; на ярком песке меньше 1.5 не читается.");
@@ -208,6 +216,17 @@ public partial class Plugin : BaseUnityPlugin
             "Как часто повторять удар головой и звук при непрерывном ослеплении. Защита от «пулемёта» при поводке луча по лицу.");
         _netSendEvery = Config.Bind("Emote", "NetSendEverySeconds", 0.25f, "Как часто слать ослепление по сети, пока луч на цели (каждый кадр — флуд).");
         _flinch = Config.Bind("Emote", "VanillaFlinch", true, "Отдёргивание головы при попадании. Единственное, что физически чувствует игрок БЕЗ мода: сетевой метод самой игры.");
+        // Свечение зеркала раскачивало автоэкспозицию игры. Зеркало занимает низ
+        // экрана и светится ярче белого, а его яркость пульсировала синусоидой с
+        // периодом 0.52 с. Экспозиция шла за этой пульсацией — и вместе с зеркалом
+        // «дышала» вся картинка. Со стороны это читалось как мерцание поверхности,
+        // хотя поверхность была ни при чём. Теперь пульсация почти выключена.
+        _flashEmission   = Config.Bind("Model", "FlashEmission", 2.2f,
+            "Яркость свечения зеркала во время свечения зайчиком. Выше 3 начинает раскачивать автоэкспозицию игры, и вся сцена заметно пульсирует.");
+        _flashPulse      = Config.Bind("Model", "FlashPulseAmount", 0.06f,
+            "Насколько свечение зеркала пульсирует (доля от яркости). Было 0.3 — именно это и давало мерцание всей сцены. 0 — ровное свечение.");
+        _flashPulseSpeed = Config.Bind("Model", "FlashPulseSpeed", 12f,
+            "Скорость пульсации свечения. 12 даёт период около полусекунды.");
         _signalGrow = Config.Bind("Spot", "SignalGrowPerMeter", 0.02f, "Насколько вспышка на зеркале растёт с каждым метром — чтобы её было видно издалека.");
         _signalMax = Config.Bind("Spot", "SignalMaxSize", 3.5f, "Потолок размера вспышки. Без него на дальней дистанции зеркало заслоняет пол-экрана.");
         _maxBlind = Config.Bind("Emote", "MaxBlindSeconds", 5f, "Потолок непрерывного ослепления. Дольше держать нельзя: иначе зеркалом можно просто выключить человека из игры.");
@@ -1338,14 +1357,17 @@ public partial class Plugin : BaseUnityPlugin
             if (bb != null) bb.allowed = on;
             if (on)
             {
-                float pulseG = 1f + 0.25f * Mathf.Sin(Time.time * 14f);
+                // Блик пульсирует вместе со свечением и той же малой амплитудой:
+                // раньше его собственные 25% добавляли к раскачке экспозиции.
+                float pulseG = 1f + _flashPulse.Value * Mathf.Sin(Time.time * (_flashPulseSpeed.Value + 2f));
                 _glintTf.localScale = _glintBaseScale * (_glintFlashMul.Value * pulseG);
             }
         }
 
         if (_heldMats == null) return;
-        float pulse = 0.7f + 0.3f * Mathf.Sin(Time.time * 12f);
-        Color e = on ? new Color(1f, 0.95f, 0.8f) * (3.5f * pulse) : Color.black;
+        float amp = Mathf.Clamp01(_flashPulse.Value);
+        float pulse = (1f - amp) + amp * Mathf.Sin(Time.time * _flashPulseSpeed.Value);
+        Color e = on ? new Color(1f, 0.95f, 0.8f) * (_flashEmission.Value * pulse) : Color.black;
         foreach (var m in _heldMats)
         {
             if (m == null || !m.HasProperty("_EmissionColor")) continue;
@@ -1570,7 +1592,7 @@ public partial class Plugin : BaseUnityPlugin
         _spotLightGo!.transform.position = point + normal * h;
         _spotLightGo.transform.rotation = Quaternion.LookRotation(-normal);
         _spotLight!.spotAngle = 2f * Mathf.Atan2(size * 0.5f, h) * Mathf.Rad2Deg;
-        _spotLight.range = h + size + 0.5f;
+        _spotLight.range = h + Mathf.Max(0.05f, _lightReach.Value);
         _spotLight.intensity = _spotGlow.Value * (1f + size * 0.25f); // дальше/крупнее → ярче
         if (!_spotLightGo.activeSelf) _spotLightGo.SetActive(true);
 
