@@ -120,6 +120,9 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<bool> _backPlate = null!, _ownIcon = null!;
     private ConfigEntry<string> _prefabFilter = null!;
     private ConfigEntry<float> _prefabDumpAtStart = null!;
+    private ConfigEntry<string> _userIdSuffix = null!;
+    private ConfigEntry<bool> _autoBlind = null!;
+    private ConfigEntry<float> _autoBlindRange = null!;
     private float _prefabDumpAt = -1f;
     private ConfigEntry<float> _backPlateGap = null!, _backPlateScale = null!;
     private static Texture2D? _idleTex, _backTex, _iconTex;
@@ -361,6 +364,24 @@ public partial class Plugin : BaseUnityPlugin
             "Размер крышки относительно диска. Меньше 1, чтобы по краю оставался ободок самого зеркала.");
         // Автодамп: клавишу нажать может быть некому (например, игру запустил не человек).
         // Больше нуля — через столько секунд после старта список выведется сам, один раз.
+        // Приписка к идентификатору Photon. Нужна, чтобы два запуска игры под одним
+        // аккаунтом Steam могли сидеть в одной комнате: иначе Photon отбивает второй
+        // вход («UserId already joined»). Ставится ТОМУ клиенту, у которого есть мод,
+        // потому что второй в проверке «что видит игрок без мода» обязан быть чистым.
+        // Клиент-«болванчик»: сам светит в ближайшего, за ним никто не сидит.
+        // Нужен, чтобы проверить вид со стороны игрока БЕЗ мода: садишься за
+        // ванильный клиент, подходишь — и тебя накрывает. Бот для этого не годится,
+        // наш код исполняет только персонаж игрока.
+        _autoBlind = Config.Bind("Debug", "AutoBlindNearest", false,
+            "Непрерывно ослеплять ближайшего, как будто держишь луч. Для клиента, за которым никто не сидит: он работает мишенью-обидчиком, пока ты играешь на другом.");
+        _autoBlindRange = Config.Bind("Debug", "AutoBlindRange", 30f,
+            "Дальность автоослепления в метрах.");
+        _userIdSuffix = Config.Bind("Debug", "PhotonUserIdSuffix", "",
+            "Приписка к идентификатору Photon, например -sm2. Нужна только когда на одной машине запущены два клиента под одним аккаунтом Steam. Пусто — обычная игра, ничего не меняется.");
+        UserIdSuffixPatch.Suffix = _userIdSuffix.Value ?? "";
+        if (UserIdSuffixPatch.Suffix.Length > 0)
+            Log.LogWarning($"Идентификатор Photon получит приписку '{UserIdSuffixPatch.Suffix}' — " +
+                           "это режим двух клиентов на одной машине.");
         _prefabDumpAtStart = Config.Bind("Debug", "PrefabDumpSecondsAfterStart", 0f,
             "Через сколько секунд после запуска вывести список префабов самому, без клавиши G. 0 — не выводить.");
         // Взводим ЗДЕСЬ, а не выше: настройка существует только после Config.Bind,
@@ -411,7 +432,7 @@ public partial class Plugin : BaseUnityPlugin
 
         Camera.onPreCull += OnCamPreCull;   // сдвиг хвата — позже анимации
 
-        try { _harmony = new Harmony(Id); _harmony.PatchAll(); Log.LogInfo("Harmony patched (reskin + suppress zoom)."); }
+        try { _harmony = new Harmony(Id); _harmony.PatchAll(); Log.LogInfo("Harmony: патч идентификатора Photon установлен."); }
         catch (System.Exception e) { Log.LogWarning($"Harmony patch failed: {e.GetType().Name}: {e.Message}"); }
 
         Log.LogInfo($"Plugin {Name} loaded. Equip={_equipKey.Value}, Use(hold)={_useKey.Value}, SelfTest={_selfTestKey.Value}");
@@ -750,6 +771,7 @@ public partial class Plugin : BaseUnityPlugin
         SetMirrorFlash(flash);   // само зеркало вспыхивает свечением (вспышка на поверхности)
 
         TickSelfBlindTimer(me);
+        TickAutoBlind(me);
         UpdateThirdPerson(me);
         LowerViewmodel();
         TickBlind();
@@ -3710,6 +3732,60 @@ public partial class Plugin : BaseUnityPlugin
     /// тем же путём, что и при настоящем попадании (эмоут + SendBlind), только
     /// цель выбирается по расстоянию.
     /// </summary>
+    /// <summary>
+    /// Автоослепление ближайшего: клиент работает «обидчиком» без человека за ним.
+    ///
+    /// Шлём каждый кадр, как при удержании луча, а не одиночным импульсом: иначе
+    /// «фитиль» не накопится и падения не будет. Сетевой поток при этом не растёт —
+    /// SendBlind сам ограничивает частоту посылок.
+    /// </summary>
+    private void TickAutoBlind(Character? me)
+    {
+        if (!_autoBlind.Value || me == null) return;
+
+        Character? best = null;
+        float bestD = _autoBlindRange.Value;
+        foreach (var c in Object.FindObjectsByType<Character>(FindObjectsSortMode.None))
+        {
+            if (c == null || c == me) continue;
+            var d = c.data;
+            if (d == null || d.dead || d.fullyPassedOut) continue;
+            float dist = Vector3.Distance(c.Center, me.Center);
+            if (dist < bestD) { bestD = dist; best = c; }
+        }
+        if (best == null) return;
+
+        // Разворачиваем обидчика к цели. Без этого он стоит спиной и ни на что
+        // не наводит, а жертву при этом накрывает — проверять «читается ли шутка»
+        // на такой картинке бессмысленно: в настоящей игре видно, что на тебя
+        // направили тарелочку. Поворот тела синхронизируется игрой, поэтому его
+        // видят все, включая клиентов без мода.
+        Vector3 look = best.Center - me.Center;
+        look.y = 0f;
+        if (look.sqrMagnitude > 1e-4f)
+        {
+            look.Normalize();
+            me.transform.rotation = Quaternion.LookRotation(look);
+            if (me.data != null)
+            {
+                me.data.lookDirection = look;
+                me.data.lookDirection_Flat = look;
+            }
+        }
+
+        if (best != _autoBlindLast)
+        {
+            _autoBlindLast = best;
+            Log.LogWarning($"[AUTO] Держу луч на '{best.name}' ({bestD:0.0} м). " +
+                           $"Зеркало в руках: {(_holdingMirror ? "да" : "НЕТ — нажми F4 на этом клиенте")}.");
+            if (_useEmote.Value && !string.IsNullOrEmpty(_emoteName.Value))
+                PlayVictimEmote(best, _emoteName.Value);
+        }
+        SendBlind(best, _beamLinger.Value);
+    }
+
+    private Character? _autoBlindLast;
+
     private void DebugBlindNearest()
     {
         var me = Character.localCharacter;
