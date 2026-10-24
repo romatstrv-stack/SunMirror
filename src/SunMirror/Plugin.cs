@@ -116,6 +116,14 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _chargeDrain = null!;
     private ConfigEntry<float> _lightReach = null!;
     private ConfigEntry<bool> _useLight = null!;
+    private ConfigEntry<bool> _backPlate = null!, _ownIcon = null!;
+    private ConfigEntry<string> _prefabFilter = null!;
+    private ConfigEntry<float> _prefabDumpAtStart = null!;
+    private float _prefabDumpAt = -1f;
+    private ConfigEntry<float> _backPlateGap = null!, _backPlateScale = null!;
+    private static Texture2D? _idleTex, _backTex, _iconTex;
+    private Transform? _backPlateTf;
+    private bool _iconReplaced;
     private ConfigEntry<float> _selfBlindDelay = null!;
     private float _selfBlindAt = -1f;
     private ConfigEntry<float> _flashEmission = null!, _flashPulse = null!, _flashPulseSpeed = null!;
@@ -317,6 +325,29 @@ public partial class Plugin : BaseUnityPlugin
             "sunspray|badgepopup|amulet|jingle|ping|petrify|curse|morale|banana|airhorn|uhhh|scoutshonor",
             "Подбор звука: клавиша . проигрывает следующего кандидата, , повторяет текущего. Несколько подстрок через '|', кандидаты идут в этом порядке. Понравившееся имя вписать в BlindSfxName.");
         _showModel     = Config.Bind("Model", "ShowModel", true, "Показывать модель зеркала в руке.");
+        // Задняя крышка. У меша тарелочки ОДИН материальный слот, поэтому обе стороны
+        // делят материал и отделить изнанку штатно нельзя. Добавляем за зеркальной
+        // плоскостью отдельный непрозрачный диск — он же несёт надпись. Это не выдумка:
+        // у настоящих сигнальных зеркал инструкция напечатана именно на обороте.
+        _backPlate     = Config.Bind("Model", "BackPlate", true,
+            "Непрозрачная задняя крышка с надписью SIGNAL MIRROR. Без неё изнанка зеркала тоже отражает, потому что у меша один материальный слот.");
+        _backPlateGap  = Config.Bind("Model", "BackPlateGap", 0.006f,
+            "Зазор между зеркальной плоскостью и задней крышкой (метры). Мало — крышка проступает сквозь зеркало, много — виден торец.");
+        _backPlateScale = Config.Bind("Model", "BackPlateScale", 0.92f,
+            "Размер крышки относительно диска. Меньше 1, чтобы по краю оставался ободок самого зеркала.");
+        // Автодамп: клавишу нажать может быть некому (например, игру запустил не человек).
+        // Больше нуля — через столько секунд после старта список выведется сам, один раз.
+        _prefabDumpAtStart = Config.Bind("Debug", "PrefabDumpSecondsAfterStart", 0f,
+            "Через сколько секунд после запуска вывести список префабов самому, без клавиши G. 0 — не выводить.");
+        // Взводим ЗДЕСЬ, а не выше: настройка существует только после Config.Bind,
+        // и обращение к .Value раньше роняло Awake исключением — мод при этом
+        // молча оставался полумёртвым, а все настройки ниже не привязывались.
+        if (_prefabDumpAtStart.Value > 0f)
+            _prefabDumpAt = Time.realtimeSinceStartup + _prefabDumpAtStart.Value;
+        _prefabFilter  = Config.Bind("Debug", "PrefabDumpFilter", "vfx",
+            "Подстрока для списка префабов по клавише G. Пусто — вывести все (их тысячи). Несколько подстрок через '|'.");
+        _ownIcon       = Config.Bind("Model", "ReplaceInventoryIcon", true,
+            "Подменять иконку предмета в инвентаре: иначе зеркало показывается в слоте как обычная тарелочка.");
         _targetSize    = Config.Bind("Model", "BaseSize", 0.3f, "Габарит модели (метры).");
         _heldScale     = Config.Bind("Model", "HeldScale", 1f, "Множитель масштаба.");
         _offX          = Config.Bind("Model", "HeldOffsetX", 0.18f, "Смещение: вправо.");
@@ -424,6 +455,17 @@ public partial class Plugin : BaseUnityPlugin
 
     private void Update()
     {
+        // Автодамп префабов — ДО всех проверок. Раньше он стоял в обработчике клавиш,
+        // то есть за «if (kb == null) return» и за выключателем отладки: в главном
+        // меню клавиатура может быть ещё не готова, и дамп не наступал никогда.
+        if (_prefabDumpAt > 0f && Time.realtimeSinceStartup >= _prefabDumpAt)
+        {
+            _prefabDumpAt = -1f;
+            Log.LogWarning("[AUTO] Вывожу список префабов (Debug/PrefabDumpSecondsAfterStart).");
+            try { DumpPrefabs(); }
+            catch (System.Exception e) { Log.LogWarning($"[AUTO] Дамп упал: {e.GetType().Name}: {e.Message}"); }
+        }
+
         // Замер: средний кадр и сколько в нём занимает НАША работа.
         // Лаги были сквозной темой проекта, а числа до сих пор ни одного.
         bool measure = _debugKeys.Value;
@@ -548,6 +590,7 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[Key.U].wasPressedThisFrame) EmergencyUnstick();   // застрял (старый баг) — отлипнуть
         if (kb[Key.P].wasPressedThisFrame) DebugBoardFlight();  // сразу вылететь на остров (отладка)
         if (kb[Key.M].wasPressedThisFrame) DebugNoon();
+        if (kb[Key.G].wasPressedThisFrame) DumpPrefabs();
         if (kb[Key.F2].wasPressedThisFrame)
         {
             _selfBlindAt = Time.time + Mathf.Max(0f, _selfBlindDelay.Value);
@@ -924,6 +967,8 @@ public partial class Plugin : BaseUnityPlugin
             }
         }
         _cloneGo = held;
+        if (_discMesh != null) EnsureBackPlate(_discMesh);
+        ReplaceInventoryIcon();
         // БАГ 0.1.3: _holdingMirror = (найден объект "Frisbee" в сцене). Тарелочка,
         // лежащая на земле или в руках у соседа, — тоже такой объект, поэтому зайчик
         // светил с пустыми руками. Спрашиваем у игры, что держит ИМЕННО наш персонаж.
@@ -1014,7 +1059,29 @@ public partial class Plugin : BaseUnityPlugin
 
     private void UpdateRealMirror()
     {
-        if (_mirrorCam == null || _discMesh == null || !_holdingMirror) return;
+        if (_mirrorCam == null || _discMesh == null) return;
+
+        // БРОШЕННОЕ ЗЕРКАЛО. Камера снимает только пока предмет в руках, поэтому у
+        // лежащей на песке тарелочки в зеркальный материал никто не рисует — и диск
+        // выглядел чёрной дырой. Подменяем текстуру на статичный металл: материал
+        // у всех дисков общий, так что это чинит и те, что лежат рядом.
+        if (!_holdingMirror)
+        {
+            if (_mirrorMat != null && _mirrorMat.HasProperty("_MainTex")
+                && _mirrorMat.GetTexture("_MainTex") != IdleTex())
+            {
+                _mirrorMat.SetTexture("_MainTex", IdleTex());
+                if (_mirrorMat.HasProperty("_TextureSample0")) _mirrorMat.SetTexture("_TextureSample0", IdleTex());
+                Log.LogInfo("Зеркало не в руках — показываем статичный металл вместо пустой текстуры отражения.");
+            }
+            return;
+        }
+        if (_mirrorMat != null && _mirrorRT != null && _mirrorMat.HasProperty("_MainTex")
+            && _mirrorMat.GetTexture("_MainTex") != _mirrorRT)
+        {
+            _mirrorMat.SetTexture("_MainTex", _mirrorRT);
+            if (_mirrorMat.HasProperty("_TextureSample0")) _mirrorMat.SetTexture("_TextureSample0", _mirrorRT);
+        }
         _mirrorFrame++;
         if (_mirrorFrame % Mathf.Max(1, _realMirrorEvery.Value) != 0) return;   // не каждый кадр
 
@@ -1203,6 +1270,197 @@ public partial class Plugin : BaseUnityPlugin
     }
 
     private Transform? _tiltPivot;
+
+    /// <summary>Статичный «металл» для брошенного зеркала: мягкий вертикальный градиент.</summary>
+    private static Texture2D IdleTex()
+    {
+        if (_idleTex != null) return _idleTex;
+        const int N = 64;
+        var t = new Texture2D(N, N, TextureFormat.RGBA32, false) { name = "SunMirrorIdle", wrapMode = TextureWrapMode.Clamp };
+        for (int y = 0; y < N; y++)
+        {
+            // сверху светлее, снизу темнее — так читается наклонная полированная поверхность
+            float k = 0.55f + 0.45f * (y / (float)(N - 1));
+            var c = new Color(k * 0.93f, k * 0.96f, k, 1f);
+            for (int x = 0; x < N; x++) t.SetPixel(x, y, c);
+        }
+        t.Apply();
+        _idleTex = t;
+        return t;
+    }
+
+    /// <summary>
+    /// Текстура задней крышки: тёмный диск с надписью SIGNAL MIRROR.
+    /// Буквы рисуем точками по сетке 5x7 — шрифта в рантайме у нас нет, а тащить
+    /// файл в пакет ради одной надписи не хочется.
+    /// </summary>
+    private static Texture2D BackTex()
+    {
+        if (_backTex != null) return _backTex;
+        const int W = 256, H = 256;
+        var t = new Texture2D(W, H, TextureFormat.RGBA32, false) { name = "SunMirrorBack", wrapMode = TextureWrapMode.Clamp };
+        var body = new Color(0.16f, 0.17f, 0.19f, 1f);
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                t.SetPixel(x, y, body);
+
+        DrawText(t, "SIGNAL", 2, 150, new Color(0.88f, 0.88f, 0.9f, 1f));
+        DrawText(t, "MIRROR", 2, 110, new Color(0.88f, 0.88f, 0.9f, 1f));
+        t.Apply();
+        _backTex = t;
+        return t;
+    }
+
+    // Простейший точечный шрифт 5x7 на заглавные буквы, которые нам нужны.
+    private static readonly Dictionary<char, string[]> Glyphs = new()
+    {
+        ['S'] = new[] { "01111", "10000", "10000", "01110", "00001", "00001", "11110" },
+        ['I'] = new[] { "11111", "00100", "00100", "00100", "00100", "00100", "11111" },
+        ['G'] = new[] { "01110", "10001", "10000", "10111", "10001", "10001", "01110" },
+        ['N'] = new[] { "10001", "11001", "11001", "10101", "10011", "10011", "10001" },
+        ['A'] = new[] { "01110", "10001", "10001", "11111", "10001", "10001", "10001" },
+        ['L'] = new[] { "10000", "10000", "10000", "10000", "10000", "10000", "11111" },
+        ['M'] = new[] { "10001", "11011", "10101", "10101", "10001", "10001", "10001" },
+        ['R'] = new[] { "11110", "10001", "10001", "11110", "10100", "10010", "10001" },
+        ['O'] = new[] { "01110", "10001", "10001", "10001", "10001", "10001", "01110" },
+        [' '] = new[] { "00000", "00000", "00000", "00000", "00000", "00000", "00000" },
+    };
+
+    private static void DrawText(Texture2D t, string text, int scale, int baseY, Color col)
+    {
+        int totalW = text.Length * 6 * scale * 5;
+        int x0 = (t.width - totalW) / 2;
+        int px = x0;
+        foreach (char ch in text)
+        {
+            if (!Glyphs.TryGetValue(ch, out var g)) { px += 6 * scale * 5; continue; }
+            for (int row = 0; row < 7; row++)
+                for (int col2 = 0; col2 < 5; col2++)
+                {
+                    if (g[row][col2] != '1') continue;
+                    // ряд 0 — верх глифа, поэтому по Y идём вниз от baseY
+                    for (int dy = 0; dy < scale * 5; dy++)
+                        for (int dx = 0; dx < scale * 5; dx++)
+                        {
+                            int X = px + col2 * scale * 5 + dx;
+                            int Y = baseY + (6 - row) * scale * 5 + dy;
+                            if (X >= 0 && X < t.width && Y >= 0 && Y < t.height) t.SetPixel(X, Y, col);
+                        }
+                }
+            px += 6 * scale * 5;
+        }
+    }
+
+    /// <summary>
+    /// Задняя крышка зеркала. Нужна потому, что у меша тарелочки один материальный
+    /// слот: зеркальный материал ложится на обе стороны сразу, и изнанка тоже
+    /// отражает. Кладём вплотную за зеркальной плоскостью отдельный непрозрачный
+    /// диск; он же несёт надпись. Слой MirrorLayer — чтобы крышка не попадала
+    /// в собственное отражение.
+    /// </summary>
+    private void EnsureBackPlate(Transform disc)
+    {
+        if (!_backPlate.Value)
+        {
+            if (_backPlateTf != null) { Destroy(_backPlateTf.gameObject); _backPlateTf = null; }
+            return;
+        }
+        if (_backPlateTf != null && _backPlateTf.parent == disc) return;
+        if (_backPlateTf != null) Destroy(_backPlateTf.gameObject);
+
+        var go = GameObject.CreatePrimitive(PrimitiveType.Quad);
+        go.name = "SunMirrorBackPlate";
+        var col = go.GetComponent<Collider>(); if (col != null) Destroy(col);
+        go.layer = MirrorLayer;
+
+        var mr = go.GetComponent<MeshRenderer>();
+        mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        mr.receiveShadows = false;
+        var sh = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Unlit/Texture");
+        var m = new Material(sh) { name = "SunMirrorBackMat" };
+        if (m.HasProperty("_BaseMap")) m.SetTexture("_BaseMap", BackTex());
+        m.mainTexture = BackTex();
+        mr.material = m;
+
+        go.transform.SetParent(disc, false);
+
+        // Размер берём от РЕАЛЬНЫХ габаритов диска, а не множителем от родителя.
+        // Примитив Quad в Unity — это метр на метр; множитель 0.92 от единичного
+        // трансформа дал бы крышку почти метровой при диске в треть метра.
+        float diaWorld = 0.3f;
+        var dr = disc.GetComponent<Renderer>() ?? disc.GetComponentInChildren<Renderer>();
+        if (dr != null) { var b = dr.bounds.size; diaWorld = Mathf.Max(b.x, Mathf.Max(b.y, b.z)); }
+
+        Vector3 ls = disc.lossyScale;
+        float sx = Mathf.Abs(ls.x) > 1e-5f ? Mathf.Abs(ls.x) : 1f;
+        float sy = Mathf.Abs(ls.y) > 1e-5f ? Mathf.Abs(ls.y) : 1f;
+        float k = Mathf.Max(0.1f, _backPlateScale.Value);
+        go.transform.localScale = new Vector3(diaWorld * k / sx, diaWorld * k / sy, 1f);
+
+        // Крышка смотрит в обратную сторону и стоит чуть позади зеркальной плоскости.
+        go.transform.localRotation = Quaternion.Euler(0f, 180f, 0f);
+        float gapLocal = Mathf.Abs(_backPlateGap.Value) / (Mathf.Abs(ls.z) > 1e-5f ? Mathf.Abs(ls.z) : 1f);
+        go.transform.localPosition = new Vector3(0f, 0f, -gapLocal);
+        _backPlateTf = go.transform;
+
+        Log.LogInfo($"Задняя крышка: диск '{disc.name}' габарит {diaWorld:0.000} м, " +
+                    $"lossyScale ({ls.x:0.000}, {ls.y:0.000}, {ls.z:0.000}), " +
+                    $"локальный масштаб крышки ({go.transform.localScale.x:0.000}, {go.transform.localScale.y:0.000}), " +
+                    $"слой {go.layer}, шейдер '{m.shader.name}'.");
+    }
+
+    /// <summary>
+    /// Иконка предмета в инвентаре. Без подмены зеркало лежит в слоте как обычная
+    /// тарелочка — предмет один и тот же, иконку игра берёт из Item.UIData.icon.
+    /// Подменяем один раз за запуск и только у тарелочки.
+    /// </summary>
+    private void ReplaceInventoryIcon()
+    {
+        if (!_ownIcon.Value || _iconReplaced) return;
+        var me = Character.localCharacter;
+        var item = me?.data?.currentItem;
+        if (item == null || item.UIData == null) return;
+
+        string have = item.UIData.itemName ?? item.name;
+        if (have.IndexOf(_mirrorItemName.Value, System.StringComparison.OrdinalIgnoreCase) < 0) return;
+
+        item.UIData.icon = IconTex();
+        item.UIData.hasAltIcon = false;
+        _iconReplaced = true;
+        Log.LogWarning($"Иконка предмета '{have}' подменена на зеркальную. " +
+                       "Правка живёт до выхода из игры: файлы игры не трогаем.");
+    }
+
+    /// <summary>Иконка: диск с бликом по диагонали. Рисуем кодом, файлов в пакете нет.</summary>
+    private static Texture2D IconTex()
+    {
+        if (_iconTex != null) return _iconTex;
+        const int N = 128;
+        var t = new Texture2D(N, N, TextureFormat.RGBA32, false) { name = "SunMirrorIcon", wrapMode = TextureWrapMode.Clamp };
+        float c0 = (N - 1) * 0.5f, rad = N * 0.46f;
+        for (int y = 0; y < N; y++)
+            for (int x = 0; x < N; x++)
+            {
+                float dx = x - c0, dy = y - c0;
+                float d = Mathf.Sqrt(dx * dx + dy * dy);
+                if (d > rad) { t.SetPixel(x, y, new Color(0, 0, 0, 0)); continue; }
+
+                // корпус: тёмный ободок и светлая зеркальная середина
+                float edge = Mathf.SmoothStep(1f, 0f, (d - rad * 0.82f) / (rad * 0.18f));
+                float k = 0.55f + 0.35f * (y / (float)(N - 1));
+                var c = Color.Lerp(new Color(0.18f, 0.19f, 0.21f), new Color(k * 0.95f, k * 0.97f, k), edge);
+
+                // блик: светлая полоса по диагонали, из-за неё диск читается как зеркало
+                float band = Mathf.Abs((dx + dy) * 0.7071f);
+                if (band < rad * 0.16f && edge > 0.5f)
+                    c = Color.Lerp(c, Color.white, 0.85f * (1f - band / (rad * 0.16f)));
+
+                t.SetPixel(x, y, c);
+            }
+        t.Apply();
+        _iconTex = t;
+        return t;
+    }
 
     private Transform EnsureTiltPivot(Transform mesh)
     {
@@ -2766,6 +3024,59 @@ public partial class Plugin : BaseUnityPlugin
     }
 
     /// <summary>Отладка: печатает имена всех звуков игры — чтобы выбрать для BlindSfxName.</summary>
+    /// <summary>
+    /// Отладка: что из ресурсов игры можно создать по сети.
+    ///
+    /// Игра умеет GameUtils.SpawnResourceAtPositionNetworked(путь, позиция, цель) —
+    /// это RPC_SpawnResourceAtPosition, который у КАЖДОГО клиента делает
+    /// Resources.Load(путь) и создаёт объект у себя. Мод получателю не нужен,
+    /// поэтому это единственный способ показать что-то игроку без мода.
+    ///
+    /// Но Resources.Load берёт ПУТЬ, а у объекта в памяти есть только имя: для
+    /// префаба во вложенной папке имени мало. Поэтому список фильтруем проверкой
+    /// Resources.Load(name) != null — то есть печатаем лишь то, что действительно
+    /// получится создать. Иначе список был бы длинным и наполовину нерабочим.
+    /// </summary>
+    private void DumpPrefabs()
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        GameObject[] all;
+        try { all = Resources.LoadAll<GameObject>(""); }
+        catch (System.Exception e) { Log.LogWarning($"[G] Не удалось перечислить ресурсы: {e.Message}"); return; }
+
+        var terms = (_prefabFilter.Value ?? "").Split('|');
+        var usable = new List<string>();
+        var seenNames = new HashSet<string>();
+        int matched = 0;
+
+        foreach (var g in all)
+        {
+            if (g == null || !seenNames.Add(g.name)) continue;
+
+            bool pass = terms.Length == 0;
+            foreach (var raw in terms)
+            {
+                string t = raw.Trim();
+                if (t.Length == 0) { pass = true; break; }
+                if (g.name.IndexOf(t, System.StringComparison.OrdinalIgnoreCase) >= 0) { pass = true; break; }
+            }
+            if (!pass) continue;
+            matched++;
+
+            // создать по сети получится только то, что грузится по голому имени
+            if (Resources.Load<GameObject>(g.name) != null) usable.Add(g.name);
+        }
+
+        usable.Sort();
+        sw.Stop();
+        Log.LogWarning($"[G] === префабы: всего в ресурсах {seenNames.Count}, " +
+                       $"под фильтр '{_prefabFilter.Value}' подошло {matched}, " +
+                       $"из них создаются по имени {usable.Count} (за {sw.ElapsedMilliseconds} мс) ===");
+        foreach (var n in usable) Log.LogInfo($"  prefab='{n}'");
+        if (usable.Count == 0)
+            Log.LogWarning("[G] Ни одного пригодного. Поменяй Debug/PrefabDumpFilter — например на explo, spore, light, flash, star.");
+    }
+
     private void DumpSfx()
     {
         var all = Resources.FindObjectsOfTypeAll<SFX_Instance>();

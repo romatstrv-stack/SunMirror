@@ -38,10 +38,13 @@ not at night, not in shade, not indoors. That is deliberate.
 
 ## Feedback
 
-Something broken, or an idea?
-**[Open an issue](https://github.com/romatstrv-stack/SunMirror/issues)** — it is
-the only place I can hear you. A bug report with your `BepInEx/LogOutput.log`
-attached is worth ten without it.
+**[Join the Sun Mirror Discord](https://discord.gg/ARuemW9sbB)** — bugs, ideas,
+clips, all welcome. Thunderstore has no comments, so that is where I can
+actually hear you. Prefer GitHub?
+[Open an issue](https://github.com/romatstrv-stack/SunMirror/issues).
+
+Either way: a bug report with your `BepInEx/LogOutput.log` attached is worth
+ten without it.
 
 ---
 
