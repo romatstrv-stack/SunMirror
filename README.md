@@ -1,79 +1,95 @@
 # Sun Mirror ☀️🪞
 
-Catch the sun with a frisbee and blind your teammate with the reflection.
+Your mate is inching along a ledge, two steps from the top. What if the sun
+got in their eyes — right now?
 
 ![Sun Mirror in action](https://raw.githubusercontent.com/romatstrv-stack/SunMirror/master/media/sunmirror-demo.gif)
 
-Pick up a frisbee, hold left mouse button, and a bright spot of sunlight crawls across
-whatever you point at. Walk it up a teammate's body to their eyes and they get dazzled:
-hands up over the face, frozen in that pose, spiral eyes, dazed mouth, unable to move
-or look away until you point the mirror somewhere else.
+Pick up a frisbee and hold left mouse button. A bright spot of sunlight crawls
+across whatever you point at. Walk it up a teammate's body and into their eyes:
+hands fly up over the face, spiral eyes, dazed mouth, and they can't move or
+look away. Hold it there and they drop.
 
-Hold the beam on their eyes for five seconds and they drop, stunned for a moment.
-Then they get up. Nobody dies, and the same target cannot be blinded again for
-four seconds — a frisbee should not be able to switch a person off.
+Then they get up, and the same target can't be blinded again for four seconds.
+A frisbee should not be able to switch a person off.
 
-## What the victim actually sees
+## It works on people who don't have the mod
 
 | | with the mod | vanilla, no mod |
 |---|---|---|
 | Hands up over the face | yes | **yes** |
 | Head flinches back | yes | **yes** |
+| Falls over after five seconds | yes | **yes** |
 | Spiral eyes, dazed mouth | yes | no |
 | Frozen in place, look locked | yes | no |
 | Blinding flare on their screen | yes | no |
-| Falls over after five seconds | yes | **yes** |
 
-The pose and the flinch travel through the game's own networking, so strangers who have
-never heard of this mod still react visibly. Everything else needs the mod on their side.
-
-**There is no way around that, and there should not be.** Delivering the rest means
-running code on someone else's machine, and nothing should ever do that unless they
-installed it themselves. If you want the whole effect, everyone installs the mod.
-
-## Requirements
-
-- BepInEx (BepInExPack_PEAK) — your mod manager pulls this in automatically.
-- Daylight. The beam only works when the sun actually reaches you: not at night,
-  not in shade, not indoors. That is deliberate.
+The pose, the flinch and the fall travel through the game's own networking, so
+a stranger who has never heard of this mod still reacts — and still falls. Only
+the one holding the mirror needs it installed.
 
 ## Install
 
-Use a mod manager (r2modman / Gale / Thunderstore Mod Manager): find **Sun Mirror**,
-click Install, launch modded.
+Mod manager (r2modman / Gale / Thunderstore Mod Manager): find **Sun Mirror**,
+click Install, launch modded. Manual: drop `Roman.SunMirror.dll` into
+`BepInEx/plugins/`.
 
-Manual: drop `Roman.SunMirror.dll` into `BepInEx/plugins/`. Nothing else is needed.
-
-## Configuration
-
-`BepInEx/config/Roman.SunMirror.cfg`, or an in-game config manager.
-
-- **Spot** — `Size`, `SpreadPerMeter`, `SpriteBrightness`: size and punch of the light spot.
-- **Emote** — `BlindHoldSeconds`, `BlindMouthName`, `PoseFreezeAt`: how long the daze lasts,
-  which mouth the victim gets, and which frame of the animation the pose holds on.
-- **Emote** — `VanillaFlinch`, `VanillaFlinchForce`: the head flinch that reaches players
-  without the mod. Set the force low; high values knock people over.
-- **Reflection** — `RealMirror`, `RealMirrorResolution`: the actual mirror surface.
-  Lower the resolution if you are tight on performance.
-- **Debug** — `DebugKeys`: developer keys, off by default.
-
-## Notes
-
-The mirror is the game's own frisbee, reskinned. It is held low with both hands so it
-never blocks your view, and the face turned towards your target is a real reflective
-surface rendered with the game's own mirror shader. You see the back of it, they see the
-glare — like a real signal mirror.
-
-## Credits
-
-Built with [PEAKLib](https://github.com/PEAKModding/PEAKLib) and BepInEx.
-No third-party models or textures are bundled: everything is either generated at runtime
-or reused from the game's own assets.
+**It needs daylight.** The beam only works when the sun actually reaches you:
+not at night, not in shade, not indoors. That is deliberate.
 
 ## Feedback
 
-Something broken, or an idea? Open an issue:
-**https://github.com/romatstrv-stack/SunMirror/issues**
+Something broken, or an idea?
+**[Open an issue](https://github.com/romatstrv-stack/SunMirror/issues)** — it is
+the only place I can hear you. A bug report with your `BepInEx/LogOutput.log`
+attached is worth ten without it.
 
-Thunderstore has no comments, so that repo is the only place I can hear you.
-Bug reports with your `BepInEx/LogOutput.log` attached are the most useful.
+---
+
+<details>
+<summary><b>Configuration</b></summary>
+
+`BepInEx/config/Roman.SunMirror.cfg`, or an in-game config manager.
+
+- **Spot** — `Size`, `SpreadPerMeter`, `SpriteBrightness`, `ContrastRing`:
+  size, punch and edge contrast of the light spot.
+- **Emote** — `MaxBlindSeconds`, `FallAtMaxBlind`, `EyesOnly`, `BlindSfxName`:
+  how long the daze lasts, whether the victim drops, whether only eye hits
+  count, and the sound on contact.
+- **Emote** — `VanillaFlinchForce`: the head flinch that reaches players
+  without the mod. Keep it low; high values knock people over.
+- **Reflection** — `RealMirror`, `RealMirrorResolution`: the actual mirror
+  surface. Lower the resolution if you are tight on performance.
+- **Model** — `FlashEmission`, `FlashPulseAmount`: how brightly the mirror
+  glows while you aim. Push the emission too high and the game's auto-exposure
+  starts chasing it, which makes the whole scene pulse.
+- **Debug** — `DebugKeys`: developer keys, off by default.
+
+</details>
+
+<details>
+<summary><b>How it is built, and what it cannot do</b></summary>
+
+The mirror is the game's own frisbee, reskinned. It is held low with both hands
+so it never blocks your view, and the face turned towards your target is a real
+reflective surface rendered with the game's own mirror shader. You see the back
+of it, they see the glare — like a real signal mirror.
+
+The beam spreads by 9 mm per metre. That is the real divergence of a sunbeam off
+a flat mirror: the sun is 0.53° across, so at 60 m the spot is about a metre
+wide. It only works in actual sunlight for the same reason.
+
+Spiral eyes, the dazed mouth and the movement lock are delivered by this mod's
+own networking, so a player without the mod will not get them. That is a limit
+of how Photon works, and it should be one: delivering the rest would mean
+running code on someone else's machine, and nothing should do that unless they
+installed it themselves.
+
+A victim holding an item will not show the hands-to-face pose — the item-hold
+animation overrides it.
+
+Built with [PEAKLib](https://github.com/PEAKModding/PEAKLib) and BepInEx. No
+third-party models or textures are bundled: everything is either generated at
+runtime or reused from the game's own assets.
+
+</details>
