@@ -20,7 +20,8 @@ A frisbee should not be able to switch a person off.
 | Head flinches back | yes | **yes** |
 | Frozen in place | yes | **yes** |
 | Falls over after four seconds | yes | **yes** |
-| Spiral eyes, dazed mouth | yes | no |
+| Spiral eyes, spinning | yes | **yes** |
+| Dazed mouth | yes | no |
 | Look locked on the glare | yes | no |
 | Blinding flare on their screen | yes | no |
 

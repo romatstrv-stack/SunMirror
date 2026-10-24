@@ -114,7 +114,7 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<bool> _poseLoop = null!;
     private ConfigEntry<float> _reactionEvery = null!;
     private ConfigEntry<float> _chargeDrain = null!;
-    private ConfigEntry<bool> _rootVictim = null!;
+    private ConfigEntry<bool> _rootVictim = null!, _spiralEyesNet = null!;
     private ConfigEntry<float> _lightReach = null!;
     private ConfigEntry<bool> _useLight = null!;
     private ConfigEntry<bool> _backPlate = null!, _ownIcon = null!;
@@ -245,6 +245,14 @@ public partial class Plugin : BaseUnityPlugin
         // Безопасно: игра сама снимает сочленение через 4 секунды, и командует этим
         // клиент самой жертвы, так что зависнуть прибитым нельзя, даже если стрелок
         // вылетит из игры.
+        // Спиральные глаза для тех, у кого мода нет.
+        // CharacterCustomization.CharacterPassedOut — сетевой метод САМОЙ игры, и он
+        // чисто косметический: меняет текстуру глаз и включает вращение (Spin = 1).
+        // Настоящая отключка живёт отдельно, в Character.RPCA_PassOut, и мы её не трогаем.
+        // Проверено по коду игры: поле isPassedOut у этого компонента не читает никто,
+        // кроме него самого, так что на игру это не влияет. Возврат — парным OnRevive_RPC.
+        _spiralEyesNet = Config.Bind("Emote", "SpiralEyesForEveryone", true,
+            "Показывать спиральные глаза и игрокам БЕЗ мода, родным методом игры. Рот так передать нельзя — у него сетевого пути нет, он остаётся только у владельцев мода.");
         _rootVictim = Config.Bind("Emote", "RootVictim", true,
             "Прибивать ослеплённого на месте штатным механизмом игры (RPCA_Stick). Это единственное обездвиживание, которое видит игрок без мода. Игра сама отпускает через 4 секунды. На карабкающихся не применяется.");
         _chargeDrain = Config.Bind("Emote", "BlindChargeDrain", 0.5f,
@@ -2638,6 +2646,41 @@ public partial class Plugin : BaseUnityPlugin
     /// а вот как поведёт себя прибитый на скале — не проверено, и выяснять это
     /// на живых игроках неправильно.
     /// </summary>
+    /// <summary>
+    /// Спиральные глаза у всех, включая игроков без мода.
+    ///
+    /// Наш способ (подмена текстуры на рендерерах) работает только на своём клиенте.
+    /// А CharacterCustomization.CharacterPassedOut — метод самой игры, помеченный
+    /// PunRPC, и он меняет ТОЛЬКО внешность: ставит passedOutEyes и Spin = 1.
+    /// Персонаж при этом не отключается — за это отвечает другой метод.
+    ///
+    /// Шлём обычным All, а не AllBuffered как игра: буферизованный RPC остался бы
+    /// в комнате и догнал бы тех, кто подключится позже, — для временного эффекта
+    /// это мусор.
+    ///
+    /// Если жертва по-настоящему отключится или умрёт, пока висит наш визуал,
+    /// Update игры сам поставит правильные глаза: там стоят проверки
+    /// data.passedOut && !isPassedOut и data.dead && !isDead.
+    /// </summary>
+    private void SpiralEyesForEveryone(Character victim, bool on)
+    {
+        if (!_spiralEyesNet.Value || victim == null) return;
+        var view = victim.photonView;
+        if (view == null || view.ViewID == 0) return;
+
+        // На по-настоящему отключённых и мёртвых не лезем: у них свои глаза
+        // от игры, и наш возврат сбил бы их.
+        var d = victim.data;
+        if (d != null && (d.dead || d.passedOut || d.fullyPassedOut)) return;
+
+        try { view.RPC(on ? "CharacterPassedOut" : "OnRevive_RPC", RpcTarget.All); }
+        catch (System.Exception e)
+        {
+            Log.LogWarning($"Спиральные глаза по сети ({(on ? "вкл" : "выкл")}): " +
+                           $"{e.GetType().Name}: {e.Message}");
+        }
+    }
+
     private void RootVictim(Character victim)
     {
         if (!_rootVictim.Value || victim == null) return;
@@ -2793,6 +2836,7 @@ public partial class Plugin : BaseUnityPlugin
             FlinchHead(victim);
             PlayBlindSfx(victim);
             RootVictim(victim);
+            SpiralEyesForEveryone(victim, true);
         }
         Log.LogInfo($"Blind begin on {victim.name} (всего целей: {_blinds.Count}" +
                     (freshReaction ? "" : ", удар и звук пропущены — реакция уже шла") + ")");
@@ -3286,7 +3330,8 @@ public partial class Plugin : BaseUnityPlugin
         if (victim == null || !_blinds.TryGetValue(victim, out var st)) return;
         _blinds.Remove(victim);
 
-        UnrootVictim(victim);   // отпускаем раньше, чем игра сделает это сама
+        UnrootVictim(victim);                    // отпускаем раньше, чем игра сделает это сама
+        SpiralEyesForEveryone(victim, false);    // и возвращаем обычные глаза всем
         ShakeOff(victim);       // третий такт: видно, что отпустило
 
         var cc = victim.GetComponentInChildren<CharacterCustomization>();
