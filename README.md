@@ -1,7 +1,6 @@
 # Sun Mirror ☀️🪞
 
-Your mate is inching along a ledge, two steps from the top. What if the sun
-got in their eyes — right now?
+Catch the sun with a frisbee and blind your teammate with the reflection.
 
 ![Sun Mirror in action](https://raw.githubusercontent.com/romatstrv-stack/SunMirror/master/media/sunmirror-demo.gif)
 

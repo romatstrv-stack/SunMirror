@@ -211,7 +211,19 @@ public partial class Plugin : BaseUnityPlugin
         _autoJoinRoom = Config.Bind("Debug", "AutoJoinHandshakeRoom", false,
             "Отладка на одной машине: при запуске сам войти в комнату, имя которой хост положил в sunmirror_room.txt (клавиша F7). Ставится только на втором клиенте.");
         if (_autoJoinRoom.Value) StartCoroutine(AutoJoinLoop());
-        _selfTarget    = Config.Bind("Debug", "SelfTarget", false, "Луч всегда бьёт в тебя — тест эффекта без второго игрока (клавиша J).");
+        _selfTarget    = Config.Bind("Debug", "SelfTarget", false,
+            "Луч всегда бьёт в тебя — тест эффекта без второго игрока (клавиша J). Сбрасывается при каждом запуске: это тумблер на один заход, а не настройка.");
+        // Гасим на старте. Тумблер сохранялся в файл и переживал перезапуски:
+        // одно случайное нажатие J — и мод молча начинал слепить хозяина вместо
+        // цели. В логе при этом всё выглядело исправным (попадание находилось
+        // верно, а жертвой подставлялся ты), поэтому причину было не видно.
+        if (_selfTarget.Value)
+        {
+            _selfTarget.Value = false;
+            Config.Save();
+            Log.LogWarning("Debug/SelfTarget был включён в конфиге — выключил. " +
+                           "Иначе зайчик слепил бы тебя самого, а не цель. Включается клавишей J на один заход.");
+        }
         _blindOn       = Config.Bind("Emote", "BlindStars", true, "Ослепление со звёздочками над головой (Affliction_Blind).");
         // Было 2.5 с: у игрока БЕЗ мода пелена висела ещё две с половиной секунды
         // после ухода луча. Для «без луча глаза открыты» это и есть главный виновник,
@@ -2258,25 +2270,7 @@ public partial class Plugin : BaseUnityPlugin
 
         if (_blinds.TryGetValue(victim, out var st))
         {
-            // Считаем НАКОПЛЕННОЕ ослепление, а не непрерывное. Непрерывное обнулялось
-            // от каждого разрыва луча в 0.4 с — после правки «без луча глаза открыты»
-            // пять секунд подряд стали недостижимы, и падение просто не наступало.
-            if (_maxBlind.Value > 0f && ChargeOf(key) >= _maxBlind.Value)
-            {
-                _cooldownUntil[key] = Time.time + Mathf.Max(0f, _cooldown.Value);
-                _blindCharge.Remove(key);     // фитиль догорел — начинаем заново
-                Log.LogInfo($"Ослепление '{victim.name}' прервано по потолку {_maxBlind.Value:0.0} с; " +
-                            $"повтор не раньше чем через {_cooldown.Value:0.0} с.");
-
-                // Падение в конце ослепления. По умолчанию выключено нарочно:
-                // Character.Fall шлёт RPCA_Fall на ВСЕХ, то есть роняет и тех, у кого
-                // мода нет. Это уже не шутка, а выключение человека из игры, поэтому
-                // решение оставлено хозяину лобби, а не навязано дефолтом.
-                if (_fallAtMax.Value) DropVictim(victim);
-
-                RestoreBlind(victim);
-                return;
-            }
+            if (TryFireCap(victim, key)) return;
         }
         else
         {
@@ -2317,7 +2311,18 @@ public partial class Plugin : BaseUnityPlugin
 
     private void AddCharge(int key, float dt)
     {
-        _blindCharge[key] = (ChargeOf(key) + dt, Time.time);
+        float cur = 0f;
+        if (_blindCharge.TryGetValue(key, out var c))
+        {
+            // Сливаем только то время, что цель была БЕЗ луча: текущий кадр не в счёт.
+            // Раньше здесь звался ChargeOf, который вычитает слив за время с прошлого
+            // обновления, а прошлое обновление — это предыдущий кадр. Выходило:
+            // прибавили dt и тут же отняли dt*BlindChargeDrain. Фитиль горел вдвое
+            // медленнее реального времени, и потолок в 5 с набирался за 10 с.
+            float idle = Mathf.Max(0f, Time.time - c.at - dt);
+            cur = Mathf.Max(0f, c.charge - idle * _chargeDrain.Value);
+        }
+        _blindCharge[key] = (cur + dt, Time.time);
     }
 
     /// <summary>
@@ -2369,6 +2374,36 @@ public partial class Plugin : BaseUnityPlugin
             }
         }
         catch (System.Exception e) { Log.LogWarning($"Падение не вышло: {e.GetType().Name}: {e.Message}"); }
+    }
+
+    /// <summary>
+    /// Потолок ослепления: догорел «фитиль» — снимаем эффект, ставим паузу и,
+    /// если разрешено, роняем цель. Возвращает true, если сработал.
+    ///
+    /// Зовётся и каждый кадр из TickBlind, и при обновлении эффекта. Раньше жил
+    /// только в обновлении, из-за чего падение зависело от того, как часто стрелок
+    /// шлёт эффект по сети: при удержании луча обновление шло каждые 0.25 с и всё
+    /// работало, а при единственном попадании потолок не проверялся вообще и
+    /// падение не наступало никогда. Это была случайность реализации, а не замысел.
+    ///
+    /// Считаем НАКОПЛЕННОЕ ослепление, а не непрерывное: непрерывное обнулялось
+    /// от каждого разрыва луча в 0.4 с, и пять секунд подряд были недостижимы.
+    /// </summary>
+    private bool TryFireCap(Character victim, int key)
+    {
+        if (_maxBlind.Value <= 0f || ChargeOf(key) < _maxBlind.Value) return false;
+
+        _cooldownUntil[key] = Time.time + Mathf.Max(0f, _cooldown.Value);
+        _blindCharge.Remove(key);     // фитиль догорел — начинаем заново
+        Log.LogInfo($"Ослепление '{victim.name}' прервано по потолку {_maxBlind.Value:0.0} с; " +
+                    $"повтор не раньше чем через {_cooldown.Value:0.0} с.");
+
+        // Падение в конце ослепления. Валит в том числе тех, у кого мода нет:
+        // Character.Fall шлёт RPCA_Fall на всех. Выключается FallAtMaxBlind.
+        if (_fallAtMax.Value) DropVictim(victim);
+
+        RestoreBlind(victim);
+        return true;
     }
 
     private BlindState BeginBlind(Character victim)
@@ -2766,7 +2801,9 @@ public partial class Plugin : BaseUnityPlugin
                 continue;
             }
 
-            AddCharge(VictimKey(victim), Time.deltaTime);
+            int vkey = VictimKey(victim);
+            AddCharge(vkey, Time.deltaTime);
+            if (TryFireCap(victim, vkey)) continue;
             Wobble(victim, st);
 
             var cc = victim.GetComponentInChildren<CharacterCustomization>();
