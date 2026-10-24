@@ -114,6 +114,7 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<bool> _poseLoop = null!;
     private ConfigEntry<float> _reactionEvery = null!;
     private ConfigEntry<float> _chargeDrain = null!;
+    private ConfigEntry<bool> _rootVictim = null!;
     private ConfigEntry<float> _lightReach = null!;
     private ConfigEntry<bool> _useLight = null!;
     private ConfigEntry<bool> _backPlate = null!, _ownIcon = null!;
@@ -238,6 +239,14 @@ public partial class Plugin : BaseUnityPlugin
         // потому что именно эту пелену видит ванильный игрок.
         _blindAfflictionSeconds = Config.Bind("Emote", "BlindAfflictionSeconds", 0.6f,
             "Мин. длительность нативного Affliction_Blind за одно обновление (сетевое, видно всем). Это же задаёт, насколько эффект переживает уход луча у игроков без мода.");
+        // Единственное обездвиживание, которое доходит до игрока БЕЗ мода.
+        // Наше movementModifier = 0 работает только на своём клиенте, а RPCA_Stick —
+        // родной метод игры: его исполняет клиент жертвы своим кодом.
+        // Безопасно: игра сама снимает сочленение через 4 секунды, и командует этим
+        // клиент самой жертвы, так что зависнуть прибитым нельзя, даже если стрелок
+        // вылетит из игры.
+        _rootVictim = Config.Bind("Emote", "RootVictim", true,
+            "Прибивать ослеплённого на месте штатным механизмом игры (RPCA_Stick). Это единственное обездвиживание, которое видит игрок без мода. Игра сама отпускает через 4 секунды. На карабкающихся не применяется.");
         _chargeDrain = Config.Bind("Emote", "BlindChargeDrain", 0.5f,
             "Как быстро стекает накопленное ослепление, когда луч ушёл с глаз (доля от реального времени). 1.0 — стекает ровно столько же, сколько копилось; 0 — не стекает вовсе, цель запоминает всё.");
         // Свой звук синтезируем в рантайме: ни один из 885 звуков игры не подошёл,
@@ -2608,6 +2617,56 @@ public partial class Plugin : BaseUnityPlugin
         SendBlind(me, Mathf.Max(_blindHoldSeconds.Value, _maxBlind.Value + 1.5f));
     }
 
+    /// <summary>
+    /// Прибить жертву на месте родным механизмом игры.
+    ///
+    /// Наше обездвиживание (movementModifier = 0) живёт только на клиенте жертвы
+    /// и до игрока без мода не доходит. RPCA_Stick — метод самой игры, поэтому
+    /// его исполнит любой клиент своим кодом, мод ему не нужен.
+    ///
+    /// Величина статуса — ноль: внутри стоит проверка statusAmount > 0, так что
+    /// никакого урона не наносится, только физическое удержание.
+    ///
+    /// Карабкающихся не трогаем: ослепление на стене мы проверяли и оно безопасно,
+    /// а вот как поведёт себя прибитый на скале — не проверено, и выяснять это
+    /// на живых игроках неправильно.
+    /// </summary>
+    private void RootVictim(Character victim)
+    {
+        if (!_rootVictim.Value || victim == null) return;
+        if (victim.data != null && victim.data.isClimbing) return;
+
+        var view = victim.photonView;
+        if (view == null || view.ViewID == 0) return;
+
+        try
+        {
+            var rig = victim.GetBodypartRig(BodypartType.Hip);
+            if (rig == null) return;
+            Vector3 pos = rig.position;
+            // Ставим туда же, где часть тела и так находится: никакого рывка.
+            view.RPC("RPCA_Stick", RpcTarget.All, BodypartType.Hip, pos, pos,
+                     CharacterAfflictions.STATUSTYPE.Injury, 0f);
+            Log.LogInfo($"Прибил '{victim.name}' на месте (RPCA_Stick, урона нет). " +
+                        "Игра отпустит сама через 4 с.");
+        }
+        catch (System.Exception e) { Log.LogWarning($"RPCA_Stick не прошёл: {e.GetType().Name}: {e.Message}"); }
+    }
+
+    /// <summary>
+    /// Снять наше удержание. Чистим ТОЛЬКО свою часть тела (RPCA_ClearJoint),
+    /// а не всё разом: RPCA_Unstick освободил бы человека и от ловушек игры,
+    /// в которые он попал сам.
+    /// </summary>
+    private void UnrootVictim(Character? victim)
+    {
+        if (!_rootVictim.Value || victim == null) return;
+        var view = victim.photonView;
+        if (view == null || view.ViewID == 0) return;
+        try { view.RPC("RPCA_ClearJoint", RpcTarget.All, BodypartType.Hip); }
+        catch (System.Exception e) { Log.LogWarning($"RPCA_ClearJoint не прошёл: {e.Message}"); }
+    }
+
     private void DropVictim(Character victim)
     {
         float sec = _fallSeconds.Value, shake = _fallShake.Value;
@@ -2726,6 +2785,7 @@ public partial class Plugin : BaseUnityPlugin
             _reactionAt[rkey] = Time.time;
             FlinchHead(victim);
             PlayBlindSfx(victim);
+            RootVictim(victim);
         }
         Log.LogInfo($"Blind begin on {victim.name} (всего целей: {_blinds.Count}" +
                     (freshReaction ? "" : ", удар и звук пропущены — реакция уже шла") + ")");
@@ -3219,7 +3279,8 @@ public partial class Plugin : BaseUnityPlugin
         if (victim == null || !_blinds.TryGetValue(victim, out var st)) return;
         _blinds.Remove(victim);
 
-        ShakeOff(victim);   // третий такт: видно, что отпустило
+        UnrootVictim(victim);   // отпускаем раньше, чем игра сделает это сама
+        ShakeOff(victim);       // третий такт: видно, что отпустило
 
         var cc = victim.GetComponentInChildren<CharacterCustomization>();
         if (cc != null) cc.forcePresetEyes = st.forcePrev;      // вернуть обычные глаза
