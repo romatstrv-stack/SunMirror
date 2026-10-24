@@ -115,6 +115,9 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _reactionEvery = null!;
     private ConfigEntry<float> _chargeDrain = null!;
     private ConfigEntry<float> _lightReach = null!;
+    private ConfigEntry<bool> _useLight = null!;
+    private ConfigEntry<float> _selfBlindDelay = null!;
+    private float _selfBlindAt = -1f;
     private ConfigEntry<float> _flashEmission = null!, _flashPulse = null!, _flashPulseSpeed = null!;
     private ConfigEntry<float> _synthVolume = null!, _synthPitch = null!;
     private ConfigEntry<float> _emoteFirstHold = null!;
@@ -163,6 +166,17 @@ public partial class Plugin : BaseUnityPlugin
         _spotSize      = Config.Bind("Spot", "Size", 0.5f, "Базовый диаметр пятна (вблизи).");
         _spread        = Config.Bind("Spot", "SpreadPerMeter", 0.009f, "Прибавка к диаметру на метр (рассеяние). 0.009 — настоящая расходимость солнечного зайчика: угловой размер Солнца 0,53 градуса даёт ~9 мм на метр. На 60 м пятно около метра.");
         _spotGlow      = Config.Bind("Spot", "Glow", 14f, "Яркость прожектора.");
+        // Отдельный выключатель прожектора: это настоящий источник света, и в URP
+        // лишний свет заставляет соседние объекты терять и возвращать освещение
+        // по кадрам. Без выключателя проверить его причастность к мерцанию
+        // можно было только пересборкой.
+        // Проверка «что будет с тем, кто лезет по скале»: светить себе и одновременно
+        // карабкаться нельзя — руки заняты. Поэтому ослепление приходит с задержкой:
+        // нажал, успел залезть, и тебя накрывает уже на стене.
+        _selfBlindDelay = Config.Bind("Debug", "SelfBlindDelaySeconds", 8f,
+            "Через сколько секунд после F2 ослепить тебя самого. Нужно, чтобы успеть залезть на скалу и посмотреть, что ослепление и падение делают с тем, кто висит на стене.");
+        _useLight      = Config.Bind("Spot", "UseLight", true,
+            "Подсвечивать место попадания настоящим источником света. Выключить, если на соседних поверхностях заметно мерцание.");
         _heightFactor  = Config.Bind("Spot", "HeightFactor", 2f, "Высота источника = размер×это (больше = мягче край).");
         // Насколько прожектор добивает ЗА поверхность, куда попал зайчик.
         // Раньше запас был «размер + 0.5 м»: на песке он уходил под землю и был незаметен,
@@ -522,6 +536,11 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[Key.U].wasPressedThisFrame) EmergencyUnstick();   // застрял (старый баг) — отлипнуть
         if (kb[Key.P].wasPressedThisFrame) DebugBoardFlight();  // сразу вылететь на остров (отладка)
         if (kb[Key.M].wasPressedThisFrame) DebugNoon();
+        if (kb[Key.F2].wasPressedThisFrame)
+        {
+            _selfBlindAt = Time.time + Mathf.Max(0f, _selfBlindDelay.Value);
+            Log.LogWarning($"[F2] Ослеплю тебя через {_selfBlindDelay.Value:0.0} с — лезь на скалу.");
+        }
         if (kb[Key.Period].wasPressedThisFrame) AuditionSfx(true);    // следующий звук-кандидат
         if (kb[Key.Comma].wasPressedThisFrame)  AuditionSfx(false);   // повторить текущий
         if (kb[Key.F11].wasPressedThisFrame) DebugSpawnBot();  // бот рядом — цель для теста сети
@@ -651,6 +670,7 @@ public partial class Plugin : BaseUnityPlugin
         else HideSignal();
         SetMirrorFlash(flash);   // само зеркало вспыхивает свечением (вспышка на поверхности)
 
+        TickSelfBlindTimer(me);
         UpdateThirdPerson(me);
         LowerViewmodel();
         TickBlind();
@@ -1588,6 +1608,12 @@ public partial class Plugin : BaseUnityPlugin
     {
         EnsureSpot();
 
+        if (!_useLight.Value)
+        {
+            if (_spotLightGo != null && _spotLightGo.activeSelf) _spotLightGo.SetActive(false);
+        }
+        else
+        {
         float h = Mathf.Max(0.15f, size * _heightFactor.Value);
         _spotLightGo!.transform.position = point + normal * h;
         _spotLightGo.transform.rotation = Quaternion.LookRotation(-normal);
@@ -1595,6 +1621,7 @@ public partial class Plugin : BaseUnityPlugin
         _spotLight.range = h + Mathf.Max(0.05f, _lightReach.Value);
         _spotLight.intensity = _spotGlow.Value * (1f + size * 0.25f); // дальше/крупнее → ярче
         if (!_spotLightGo.activeSelf) _spotLightGo.SetActive(true);
+        }
 
         if (_showSprite.Value)
         {
@@ -2300,22 +2327,45 @@ public partial class Plugin : BaseUnityPlugin
     /// для таких целей вызываем тот же RPCA_Fall напрямую — он всего лишь
     /// выставляет data.fallSeconds, остальное делает штатный FixedUpdate игры.
     /// </summary>
+    /// <summary>
+    /// Отложенное ослепление самого себя (F2). Держим дольше потолка, чтобы «фитиль»
+    /// успел догореть и сработало падение — иначе главное в этой проверке
+    /// (что делает падение с тем, кто висит на стене) просто не наступит.
+    /// </summary>
+    private void TickSelfBlindTimer(Character? me)
+    {
+        if (_selfBlindAt < 0f || Time.time < _selfBlindAt) return;
+        _selfBlindAt = -1f;
+        if (me == null) { Log.LogWarning("[F2] Персонажа нет — ослеплять некого."); return; }
+
+        bool climbing = me.data != null && me.data.isClimbing;
+        Log.LogWarning($"[F2] Ослепляю тебя сейчас. Ты {(climbing ? "НА СТЕНЕ" : "на земле")}.");
+        if (_useEmote.Value && !string.IsNullOrEmpty(_emoteName.Value))
+            PlayVictimEmote(me, _emoteName.Value);
+        SendBlind(me, Mathf.Max(_blindHoldSeconds.Value, _maxBlind.Value + 1.5f));
+    }
+
     private void DropVictim(Character victim)
     {
         float sec = _fallSeconds.Value, shake = _fallShake.Value;
+        // Главный вопрос по лезущим: отпускает ли упавший стену. Пишем состояние
+        // в момент падения, чтобы судить по записи, а не по впечатлению.
+        bool climbing = victim.data != null && victim.data.isClimbing;
         try
         {
             var view = victim.photonView;
             if (view != null && view.ViewID != 0)
             {
                 victim.Fall(sec, shake);
-                Log.LogInfo($"Падение '{victim.name}' на {sec:0.0} с (тряска {shake:0.0}), по сети.");
+                Log.LogInfo($"Падение '{victim.name}' на {sec:0.0} с (тряска {shake:0.0}), по сети. " +
+                            $"Цель {(climbing ? "ВИСЕЛА НА СТЕНЕ" : "стояла на земле")}.");
             }
             else
             {
                 victim.RPCA_Fall(sec, shake);
                 Log.LogInfo($"Падение '{victim.name}' на {sec:0.0} с — локально: " +
-                            "персонаж не зарегистрирован в сети (ViewID=0), RPC ему не доставить.");
+                            "персонаж не зарегистрирован в сети (ViewID=0), RPC ему не доставить. " +
+                            $"Цель {(climbing ? "ВИСЕЛА НА СТЕНЕ" : "стояла на земле")}.");
             }
         }
         catch (System.Exception e) { Log.LogWarning($"Падение не вышло: {e.GetType().Name}: {e.Message}"); }
