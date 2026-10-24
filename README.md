@@ -18,14 +18,16 @@ A frisbee should not be able to switch a person off.
 |---|---|---|
 | Hands up over the face | yes | **yes** |
 | Head flinches back | yes | **yes** |
-| Falls over after five seconds | yes | **yes** |
+| Frozen in place | yes | **yes** |
+| Falls over after four seconds | yes | **yes** |
 | Spiral eyes, dazed mouth | yes | no |
-| Frozen in place, look locked | yes | no |
+| Look locked on the glare | yes | no |
 | Blinding flare on their screen | yes | no |
 
-The pose, the flinch and the fall travel through the game's own networking, so
-a stranger who has never heard of this mod still reacts — and still falls. Only
-the one holding the mirror needs it installed.
+The pose, the flinch, the rooting and the fall all travel through the game's own
+networking, so a stranger who has never heard of this mod still reacts, still
+gets stuck, and still falls over. Only the one holding the mirror needs it
+installed.
 
 ## Install
 
