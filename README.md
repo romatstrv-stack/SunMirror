@@ -36,6 +36,8 @@ Mod manager (r2modman / Gale / Thunderstore Mod Manager): find **Sun Mirror**,
 click Install, launch modded. Manual: drop `Roman.SunMirror.dll` into
 `BepInEx/plugins/`.
 
+**Works with PEAK 3.0.1**, the current game update.
+
 **It needs daylight.** The beam only works when the sun actually reaches you:
 not at night, not in shade, not indoors. That is deliberate.
 
