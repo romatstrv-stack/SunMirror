@@ -500,6 +500,7 @@ public partial class Plugin : BaseUnityPlugin
 
     private void Update()
     {
+        MarkSelfModded();
         // Автодамп префабов — ДО всех проверок. Раньше он стоял в обработчике клавиш,
         // то есть за «if (kb == null) return» и за выключателем отладки: в главном
         // меню клавиатура может быть ещё не готова, и дамп не наступал никогда.
@@ -2527,12 +2528,46 @@ public partial class Plugin : BaseUnityPlugin
             _lastNetLogged = victim;
             Log.LogInfo($"[SEND] RPC -> '{victim.name}' viewID={view.ViewID} от {shooter}");
         }
-        try { view.RPC(SunMirrorNet.RpcName, RpcTarget.All, seconds, shooter); }
+        try
+        {
+            // Свой RPC — только тем, у кого мод есть: у остальных метода нет, и Photon
+            // писал бы им в лог ошибку на каждую посылку. Игроки без мода от этого
+            // ничего не теряют: всё, что им видно, рассылается родными RPC игры из
+            // BeginBlind. Себя не исключаем никогда — именно этот вызов у стрелка
+            // и запускает BeginBlind, а с ним и родные RPC для всех.
+            int sent = 0;
+            foreach (var p in PhotonNetwork.PlayerList)
+            {
+                if (!p.IsLocal && !p.CustomProperties.ContainsKey(ModPlayerProp)) continue;
+                view.RPC(SunMirrorNet.RpcName, p, seconds, shooter);
+                sent++;
+            }
+            if (sent == 0) StartOrRefreshBlind(victim, seconds);   // офлайн/без комнаты
+        }
         catch (System.Exception e)
         {
             Log.LogWarning($"RPC ослепления не ушёл ({e.Message}) — применяю локально.");
             StartOrRefreshBlind(victim, seconds);
         }
+    }
+
+    /// <summary>Свойство игрока Photon, по которому другие клиенты узнают, что мод у нас есть.</summary>
+    private const string ModPlayerProp = "SunMirror";
+    private string? _markedRoom;
+
+    /// <summary>
+    /// Отмечаемся в каждой комнате, куда входим: стрелки с модом шлют свой RPC
+    /// только отмеченным. Раз на комнату — SetCustomProperties это сетевая операция.
+    /// </summary>
+    private void MarkSelfModded()
+    {
+        if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) { _markedRoom = null; return; }
+        string room = PhotonNetwork.CurrentRoom.Name;
+        if (_markedRoom == room) return;
+        _markedRoom = room;
+        PhotonNetwork.LocalPlayer.SetCustomProperties(
+            new ExitGames.Client.Photon.Hashtable { { ModPlayerProp, 1 } });
+        Log.LogInfo($"[NET] Отметился в комнате '{room}' как игрок с модом.");
     }
 
     /// <summary>
