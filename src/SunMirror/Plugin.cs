@@ -107,6 +107,12 @@ public partial class Plugin : BaseUnityPlugin
     private string? _guestUserId;   // свой Photon UserId для второго клиента на той же машине
     private ConfigEntry<float> _signalGrow = null!;
     private ConfigEntry<float> _signalMax = null!;
+    private ConfigEntry<float> _signalLightBright = null!;
+    // Сглаженная яркость прожектора: сырое значение дёргается каждый кадр.
+    private float _spotLitSmooth;
+    // Отладка мерцания: 0 — всё включено, 1 — без точечных светов, 2 — без свечения,
+    // 3 — ни того, ни другого. Поле, а не конфиг: не должно пережить перезапуск.
+    private int _glowStage;
     private ConfigEntry<float> _beamLinger = null!;
     private ConfigEntry<float> _maxBlind = null!;
     private ConfigEntry<float> _cooldown = null!;
@@ -283,6 +289,8 @@ public partial class Plugin : BaseUnityPlugin
             "Скорость пульсации свечения. 12 даёт период около полусекунды.");
         _signalGrow = Config.Bind("Spot", "SignalGrowPerMeter", 0.02f, "Насколько вспышка на зеркале растёт с каждым метром — чтобы её было видно издалека.");
         _signalMax = Config.Bind("Spot", "SignalMaxSize", 3.5f, "Потолок размера вспышки. Без него на дальней дистанции зеркало заслоняет пол-экрана.");
+        _signalLightBright = Config.Bind("Spot", "SignalLightBrightness", 12f,
+            "Яркость точечного света у вспышки на зеркале. Он тоже попадает в замер автоэкспозиции: если при наводке сцена заметно темнеет — убавить.");
         // Четыре, а не пять, и это не круглое число ради красоты: ровно через 4 секунды
         // игра сама снимает удержание (HandleStickUpdate -> RPCA_ClearJoint). При пяти
         // получался разрыв — на 4-й секунде жертва освобождалась и секунду стояла
@@ -637,6 +645,7 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[Key.P].wasPressedThisFrame) DebugBoardFlight();  // сразу вылететь на остров (отладка)
         if (kb[Key.M].wasPressedThisFrame) DebugNoon();
         if (kb[Key.G].wasPressedThisFrame) DumpPrefabs();
+        if (kb[Key.V].wasPressedThisFrame) DebugCycleGlow();
         if (kb[Key.F2].wasPressedThisFrame)
         {
             _selfBlindAt = Time.time + Mathf.Max(0f, _selfBlindDelay.Value);
@@ -1679,6 +1688,26 @@ public partial class Plugin : BaseUnityPlugin
         _tpCam.transform.LookAt(head);
     }
 
+    /// <summary>
+    /// Единственная пульсация яркости во всём моде. Раньше таких синусоид было три,
+    /// с одной и той же частотой 12 рад/с (период 0.52 с) и разной амплитудой, и жили
+    /// они в разных местах: свечение материала, масштаб блика и свет у вспышки. Убавили
+    /// первую — мерцание осталось, потому что две других продолжали раскачивать
+    /// автоэкспозицию. Теперь формула одна, и амплитуда у неё одна — FlashPulseAmount.
+    /// При 0 функция возвращает ровную единицу, то есть пульсации нет вообще нигде.
+    /// </summary>
+    private float FlashPulse(float speedBonus = 0f)
+    {
+        float amp = Mathf.Clamp01(_flashPulse.Value);
+        if (amp <= 0f) return 1f;
+        return (1f - amp) + amp * Mathf.Sin(Time.time * (_flashPulseSpeed.Value + speedBonus));
+    }
+
+    /// <summary>Свечение материала и блик — включены на этой стадии отладки?</summary>
+    private bool GlowEmissionOn => _glowStage == 0 || _glowStage == 1;
+    /// <summary>Точечные светильники (прожектор зайчика, свет вспышки) — включены?</summary>
+    private bool GlowLightsOn => _glowStage == 0 || _glowStage == 2;
+
     // Зеркало вспыхивает ярким свечением, когда светишь в игрока.
     private void SetMirrorFlash(bool on)
     {
@@ -1691,24 +1720,24 @@ public partial class Plugin : BaseUnityPlugin
         if (_glintTf != null)
         {
             var bb = _glintTf.GetComponent<Billboard>();
-            if (bb != null) bb.allowed = on;
+            if (bb != null) bb.allowed = on && GlowEmissionOn;
             if (on)
             {
                 // Блик пульсирует вместе со свечением и той же малой амплитудой:
                 // раньше его собственные 25% добавляли к раскачке экспозиции.
-                float pulseG = 1f + _flashPulse.Value * Mathf.Sin(Time.time * (_flashPulseSpeed.Value + 2f));
+                float pulseG = FlashPulse(2f);
                 _glintTf.localScale = _glintBaseScale * (_glintFlashMul.Value * pulseG);
             }
         }
 
         if (_heldMats == null) return;
-        float amp = Mathf.Clamp01(_flashPulse.Value);
-        float pulse = (1f - amp) + amp * Mathf.Sin(Time.time * _flashPulseSpeed.Value);
-        Color e = on ? new Color(1f, 0.95f, 0.8f) * (_flashEmission.Value * pulse) : Color.black;
+        float pulse = FlashPulse();
+        bool glow = on && GlowEmissionOn;
+        Color e = glow ? new Color(1f, 0.95f, 0.8f) * (_flashEmission.Value * pulse) : Color.black;
         foreach (var m in _heldMats)
         {
             if (m == null || !m.HasProperty("_EmissionColor")) continue;
-            if (on) m.EnableKeyword("_EMISSION");
+            if (glow) m.EnableKeyword("_EMISSION");
             m.SetColor("_EmissionColor", e);
         }
     }
@@ -1735,13 +1764,23 @@ public partial class Plugin : BaseUnityPlugin
         Vector3 lookFrom = viewer != null ? viewer.transform.position
             : (cam != null ? cam.transform.position : pos - Vector3.forward);
         _signal.transform.rotation = Quaternion.LookRotation(pos - lookFrom);
-        float pulse = 0.7f + 0.3f * Mathf.Sin(Time.time * 12f);
+        // Здесь и сидел остаток мерцания. Эта синусоида — 0.7..1.0 на частоте 12 рад/с,
+        // то есть размах 30% с периодом ровно 0.52 с, замеренным на записи. Она качала
+        // и размер вспышки, и силу света под ней, прямо в полуметре от камеры.
+        float pulse = FlashPulse();
         // Растём с расстоянием до смотрящего: зеркало должно быть заметно и за сто метров,
         // иначе на таком удалении вспышка превращается в один пиксель.
         float dist = Vector3.Distance(pos, lookFrom);
         float size = Mathf.Clamp(0.6f + dist * _signalGrow.Value, 0.6f, _signalMax.Value);
         _signal.transform.localScale = Vector3.one * (size * pulse);
-        if (_signalLight != null) _signalLight.intensity = 12f * pulse;
+        if (_signalLight != null)
+        {
+            // Яркость света держим ровной. Пульсировать ей нельзя: автоэкспозиция
+            // замеряет светильники сильнее всего, а этот висит в полуметре от камеры.
+            // Размер самой картинки по-прежнему дышит — это видно, но не замеряется.
+            _signalLight.enabled = GlowLightsOn;
+            _signalLight.intensity = _signalLightBright.Value;
+        }
         if (!_signal.activeSelf) _signal.SetActive(true);
 
 
@@ -1787,6 +1826,20 @@ public partial class Plugin : BaseUnityPlugin
         _signalLight.shadows = LightShadows.None;
         _signal.SetActive(false);
         DontDestroyOnLoad(_signal);
+    }
+
+    /// <summary>
+    /// Измерение мерцания, а не лечение: по очереди гасит источники яркости, чтобы
+    /// увидеть, который из них раскачивает автоэкспозицию. Четыре нажатия — круг.
+    /// Если картинка перестаёт «дышать» на какой-то стадии, виноват выключенный на ней.
+    /// Стадию нарочно держим в поле, а не в конфиге: тумблер, переживший перезапуск,
+    /// уже однажды стоил нам дня отладки.
+    /// </summary>
+    private void DebugCycleGlow()
+    {
+        _glowStage = (_glowStage + 1) % 4;
+        string[] names = { "всё включено", "без точечных светов", "без свечения и блика", "ни света, ни свечения" };
+        Log.LogWarning($"[МЕРЦАНИЕ] стадия {_glowStage}: {names[_glowStage]}");
     }
 
     // Ближайшее попадание, игнорируя предмет в руках и собственного персонажа.
@@ -1925,9 +1978,10 @@ public partial class Plugin : BaseUnityPlugin
     {
         EnsureSpot();
 
-        if (!_useLight.Value)
+        if (!_useLight.Value || !GlowLightsOn)
         {
             if (_spotLightGo != null && _spotLightGo.activeSelf) _spotLightGo.SetActive(false);
+            _spotLitSmooth = 0f;
         }
         else
         {
@@ -1936,7 +1990,13 @@ public partial class Plugin : BaseUnityPlugin
         _spotLightGo.transform.rotation = Quaternion.LookRotation(-normal);
         _spotLight!.spotAngle = 2f * Mathf.Atan2(size * 0.5f, h) * Mathf.Rad2Deg;
         _spotLight.range = h + Mathf.Max(0.05f, _lightReach.Value);
-        _spotLight.intensity = _spotGlow.Value * (1f + size * 0.25f); // дальше/крупнее → ярче
+        // Яркость догоняем плавно. size пересчитывается каждый кадр от дистанции и дрожи
+        // прицела, так что сырое значение дёргается — а за ним дёргалась и экспозиция.
+        float wantI = _spotGlow.Value * (1f + size * 0.25f);   // дальше/крупнее → ярче
+        _spotLitSmooth = _spotLitSmooth > 0f
+            ? Mathf.Lerp(_spotLitSmooth, wantI, 1f - Mathf.Exp(-8f * Time.deltaTime))
+            : wantI;
+        _spotLight.intensity = _spotLitSmooth;
         if (!_spotLightGo.activeSelf) _spotLightGo.SetActive(true);
         }
 
@@ -1964,6 +2024,7 @@ public partial class Plugin : BaseUnityPlugin
     private void HideSpot()
     {
         if (_spotLightGo != null && _spotLightGo.activeSelf) _spotLightGo.SetActive(false);
+        _spotLitSmooth = 0f;
         if (_spotQuad != null && _spotQuad.activeSelf) _spotQuad.SetActive(false);
     }
 

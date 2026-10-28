@@ -59,7 +59,9 @@ ten without it.
 `BepInEx/config/Roman.SunMirror.cfg`, or an in-game config manager.
 
 - **Spot** — `Size`, `SpreadPerMeter`, `SpriteBrightness`, `ContrastRing`:
-  size, punch and edge contrast of the light spot.
+  size, punch and edge contrast of the light spot. `SignalLightBrightness`: the
+  glint other players see on your mirror. Turn it down if the scene dims while
+  you aim — the game's auto-exposure is metering it.
 - **Emote** — `MaxBlindSeconds`, `FallAtMaxBlind`, `EyesOnly`, `BlindSfxName`:
   how long the daze lasts, whether the victim drops, whether only eye hits
   count, and the sound on contact.
@@ -68,7 +70,9 @@ ten without it.
 - **Reflection** — `RealMirror`, `RealMirrorResolution`: the actual mirror
   surface. Lower the resolution if you are tight on performance.
 - **Model** — `FlashEmission`, `FlashPulseAmount`: how brightly the mirror
-  glows while you aim. Push the emission too high and the game's auto-exposure
+  glows while you aim, and how much that glow shimmers. `FlashPulseAmount` is
+  the only thing in the mod that varies brightness over time; set it to `0` for
+  a dead-steady glow. Push the emission too high and the game's auto-exposure
   starts chasing it, which makes the whole scene pulse.
 - **Debug** — `DebugKeys`: developer keys, off by default.
 
