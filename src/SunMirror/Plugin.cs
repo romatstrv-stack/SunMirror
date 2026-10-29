@@ -156,6 +156,10 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _yaw = null!, _pitch = null!, _roll = null!;
 
     private GameObject? _mirrorPrototype, _held, _spotQuad, _spotLightGo, _signal;
+    // «Бот слепит меня»: режим, бот-обидчик и зеркало у него в руке.
+    private bool _botBlindsMe;
+    private Character? _botAttacker;
+    private GameObject? _botDisc;
     private Harmony? _harmony;
     private Light? _spotLight, _signalLight;
     private Material[]? _heldMats;
@@ -489,14 +493,15 @@ public partial class Plugin : BaseUnityPlugin
             _discMesh = null; _tiltPivot = null; _glintTf = null;
 
             // наши объекты (часть с DontDestroyOnLoad — сами не исчезнут)
-            foreach (var go in new[] { _mirrorPrototype, _held, _spotQuad, _spotLightGo, _signal })
+            foreach (var go in new[] { _mirrorPrototype, _held, _spotQuad, _spotLightGo, _signal, _botDisc })
                 if (go != null) Object.Destroy(go);
             if (_tpCam != null) Object.Destroy(_tpCam.gameObject);
             if (_probe != null) { Object.Destroy(_probe.gameObject); _probe = null; }
             if (_mirrorCam != null) { Object.Destroy(_mirrorCam.gameObject); _mirrorCam = null; }
             if (_mirrorRT != null) { _mirrorRT.Release(); Object.Destroy(_mirrorRT); _mirrorRT = null; }
             if (_testRig != null) { Object.Destroy(_testRig); _testRig = null; }
-            _mirrorPrototype = _held = _spotQuad = _spotLightGo = _signal = null;
+            _mirrorPrototype = _held = _spotQuad = _spotLightGo = _signal = _botDisc = null;
+            _botBlindsMe = false; _botAttacker = null;
             _tpCam = null; _heldMats = null; _cloneGo = null;
 
             _harmony?.UnpatchSelf();           // снять Harmony-патчи (иначе зум останется заглушен)
@@ -649,6 +654,7 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[Key.M].wasPressedThisFrame) DebugNoon();
         if (kb[Key.G].wasPressedThisFrame) DumpPrefabs();
         if (kb[Key.V].wasPressedThisFrame) DebugCycleGlow();
+        if (kb[Key.Y].wasPressedThisFrame) DebugBotBlindsMe();  // бот берёт зеркало и светит В ТЕБЯ
         if (kb[Key.F2].wasPressedThisFrame)
         {
             _selfBlindAt = Time.time + Mathf.Max(0f, _selfBlindDelay.Value);
@@ -785,6 +791,9 @@ public partial class Plugin : BaseUnityPlugin
 
         TickSelfBlindTimer(me);
         TickAutoBlind(me);
+        // После ShowSignal/HideSignal выше: в этом режиме блик принадлежит боту,
+        // и перерисовать его надо последним, иначе HideSignal этого же кадра погасит.
+        TickBotBlindsMe(me);
         UpdateThirdPerson(me);
         LowerViewmodel();
         TickBlind();
@@ -1867,6 +1876,130 @@ public partial class Plugin : BaseUnityPlugin
     }
 
     private bool _emotePlayed;
+    // ================= БОТ СЛЕПИТ МЕНЯ (клавиша Y) =================
+    //
+    // Зачем. Всё, что мод делает с жертвой, мы до сих пор видели только со стороны
+    // обидчика: держишь зеркало, светишь в бота, смотришь на чужие руки у лица.
+    // А главное в моде — то, что видит ослеплённый, и этого взгляда не было.
+    // SelfTarget не годится: там зеркало в твоей же руке, засвет идёт от неё, и
+    // кадр получается неправдой — так тебя никто слепить не будет.
+    //
+    // Здесь обидчик — бот. Он разворачивается к тебе, в руке у него зеркало,
+    // блик на этом зеркале горит, а засвет на экране считается от его руки.
+    // Эффекты жертвы — те же самые: это буквально тот же SendBlind, что уходит
+    // живому игроку, просто целью стоишь ты.
+    private void DebugBotBlindsMe()
+    {
+        _botBlindsMe = !_botBlindsMe;
+        if (!_botBlindsMe)
+        {
+            if (_botDisc != null) { Object.Destroy(_botDisc); _botDisc = null; }
+            _botAttacker = null;
+            ClearTarget();
+            HideSignal();
+            Log.LogWarning("[Y] Бот перестал слепить.");
+            return;
+        }
+
+        var me = Character.localCharacter;
+        if (me == null) { _botBlindsMe = false; Log.LogWarning("[Y] Персонажа нет."); return; }
+
+        _botAttacker = FindNearestBot(me);
+        if (_botAttacker == null)
+        {
+            DebugSpawnBot();   // бота рядом нет — поставим, подхватим его в тике
+            Log.LogWarning("[Y] Бота не было, спавню. Через секунду начнёт слепить.");
+        }
+        else Log.LogWarning($"[Y] '{_botAttacker.name}' берёт зеркало и светит тебе в глаза. Y — выключить.");
+
+        DebugNoon();   // ночью луча не будет, а режим ради того и включают
+    }
+
+    /// <summary>Ближайший бот в сцене. Боты не попадают в Character.AllCharacters — ищем по сцене.</summary>
+    private static Character? FindNearestBot(Character me)
+    {
+        Character? best = null;
+        float bestD = 60f;
+        foreach (var c in Object.FindObjectsByType<Character>(FindObjectsSortMode.None))
+        {
+            if (c == null || !c.isBot) continue;
+            float d = Vector3.Distance(c.Center, me.Center);
+            if (d < bestD) { bestD = d; best = c; }
+        }
+        return best;
+    }
+
+    private void TickBotBlindsMe(Character? me)
+    {
+        if (!_botBlindsMe || me == null) return;
+        if (_botAttacker == null) _botAttacker = FindNearestBot(me);
+        var bot = _botAttacker;
+        if (bot == null) return;
+
+        // Бот смотрит на тебя. Делаем каждый кадр: его ИИ иначе отвернётся.
+        Vector3 toMe = me.Center - bot.Center; toMe.y = 0f;
+        if (toMe.sqrMagnitude > 1e-4f)
+            bot.transform.rotation = Quaternion.LookRotation(toMe.normalized);
+
+        Vector3 hand = HandAnchor(bot);
+        Vector3 eyes = me.GetCameraPos(0f);
+
+        EnsureBotDisc();
+        if (_botDisc != null)
+        {
+            _botDisc.transform.position = hand;
+            // Цилиндр лежит осью по Y, а зеркало должно смотреть плоскостью на тебя:
+            // отсюда доворот на 90° вокруг X поверх взгляда в твою сторону.
+            Vector3 face = eyes - hand;
+            if (face.sqrMagnitude > 1e-4f)
+                _botDisc.transform.rotation = Quaternion.LookRotation(face.normalized) * Quaternion.Euler(90f, 0f, 0f);
+            if (!_botDisc.activeSelf) _botDisc.SetActive(true);
+        }
+
+        // Блик на зеркале бота — ровно тот, что ты увидел бы от живого обидчика.
+        ShowSignal(bot);
+
+        // Засвет экрана: источник — рука бота, а не твоя. Ради этого всё и затевалось.
+        _lastLocalHitTime = Time.time;
+        _glareSourcePos = hand;
+        _glareSourceValid = true;
+
+        // Пятна зайчика здесь нет нарочно: оно легло бы тебе на лицо, то есть вплотную
+        // к камере, и закрыло бы весь экран белым. В первом лице его и не видно.
+
+        if (_victim != me) { _victim = me; _emotePlayed = false; }
+        if (!_emotePlayed)
+        {
+            if (_useEmote.Value && !string.IsNullOrEmpty(_emoteName.Value))
+                PlayVictimEmote(me, _emoteName.Value);
+            _emotePlayed = true;
+        }
+
+        SendBlind(me, _beamLinger.Value);
+    }
+
+    /// <summary>Зеркало в руке бота. Не настоящее отражение, а узнаваемый диск: смотрят на него со стороны.</summary>
+    private void EnsureBotDisc()
+    {
+        if (_botDisc != null) return;
+        _botDisc = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+        _botDisc.name = "SunMirrorBotDisc";
+        var col = _botDisc.GetComponent<Collider>();
+        if (col != null) Object.Destroy(col);
+        _botDisc.transform.localScale = new Vector3(0.3f, 0.012f, 0.3f);
+        var mr = _botDisc.GetComponent<MeshRenderer>();
+        mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        var sh = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
+        var mat = new Material(sh) { name = "SunMirrorBotDiscMat" };
+        if (mat.HasProperty("_BaseMap")) mat.SetTexture("_BaseMap", IdleTex());
+        if (mat.HasProperty("_MainTex")) mat.SetTexture("_MainTex", IdleTex());
+        if (mat.HasProperty("_BaseColor")) mat.SetColor("_BaseColor", new Color(0.85f, 0.87f, 0.9f, 1f));
+        if (mat.HasProperty("_Metallic")) mat.SetFloat("_Metallic", 1f);
+        if (mat.HasProperty("_Smoothness")) mat.SetFloat("_Smoothness", 0.9f);
+        mr.material = mat;
+        Log.LogInfo("[Y] Зеркало для бота собрано.");
+    }
+
     private void ClearTarget() { _victim = null; _emotePlayed = false; }
 
     private void UpdateSpot()
