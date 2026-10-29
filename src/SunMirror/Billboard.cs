@@ -1,4 +1,4 @@
-using UnityEngine;
+﻿using UnityEngine;
 
 namespace SunMirror;
 
@@ -28,12 +28,27 @@ internal sealed class Billboard : MonoBehaviour
         // и блик из-за этого висел в воздухе рядом с диском, а не на нём.
         Vector3 anchor = _mirrorRend != null ? _mirrorRend.bounds.center : mirror.position;
 
-        // Лицевая сторона зеркала — та, что смотрит ОТ игрока (в неё он целится).
-        // Считаем от персонажа, а не от камеры: в виде от третьего лица камера сзади.
-        var me = Character.localCharacter;
-        Vector3 holder = me != null ? me.transform.position : cam.transform.position;
-        Vector3 n = mirror.forward;
-        if (Vector3.Dot(n, anchor - holder) < 0f) n = -n;
+        // Лицевая сторона зеркала — та, куда уходит луч. Берём её прямо из Plugin:
+        // он знает точку, в которую сейчас светит зайчик.
+        //
+        // Раньше сторону считали по вектору «от ног персонажа к зеркалу». В третьем лице
+        // это работало, а в первом — нет: зеркало висит у камеры, то есть примерно над
+        // персонажем, вектор получается почти вертикальным, а нормаль зеркала —
+        // горизонтальная. Знак такого скалярного произведения случаен, и блик показывался
+        // носителю, который смотрит зеркалу в спину.
+        Vector3 n;
+        Vector3? aim = Plugin.Instance != null ? Plugin.Instance.GlareAimPoint : null;
+        if (aim.HasValue && (aim.Value - anchor).sqrMagnitude > 1e-4f)
+        {
+            n = (aim.Value - anchor).normalized;
+        }
+        else
+        {
+            var me = Character.localCharacter;
+            Vector3 holder = me != null ? me.transform.position : cam.transform.position;
+            n = mirror.forward;
+            if (Vector3.Dot(n, anchor - holder) < 0f) n = -n;
+        }
 
         // Блик виден только зрителю с лицевой стороны (тиммейту), но при этом РАЗВЁРНУТ К КАМЕРЕ —
         // иначе с косых ракурсов он виден с ребра и выглядит как яркая полоска-артефакт.
