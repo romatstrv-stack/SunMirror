@@ -785,7 +785,12 @@ public partial class Plugin : BaseUnityPlugin
         // когда луч уже зацепил игрока. Иначе тиммейт издалека не поймёт, что его зовут:
         // чтобы вспышка появилась, надо было сначала попасть ему в глаза.
         bool flash = (active && me != null && _spotHasPos) || demo;
-        if (flash && me != null) { ShowSignal(me); if (demo) _lastLocalHitTime = Time.time; }
+        if (flash && me != null)
+        {
+            // В демо на себе стороны нет — светишь себе же, проверять нечего.
+            ShowSignal(me, _spotHasPos && !demo ? _spotPos : (Vector3?)null);
+            if (demo) _lastLocalHitTime = Time.time;
+        }
         else HideSignal();
         SetMirrorFlash(flash);   // само зеркало вспыхивает свечением (вспышка на поверхности)
 
@@ -1755,7 +1760,11 @@ public partial class Plugin : BaseUnityPlugin
     }
 
     // Яркий пульсирующий блик над игроком — «отражение солнца» / сигнал «я здесь» издалека.
-    private void ShowSignal(Character me)
+    /// <param name="aimPoint">
+    /// Куда направлен зайчик. По нему считается лицевая сторона зеркала: вспышку видит
+    /// только тот, кто стоит СО СТОРОНЫ ЛУЧА. null — сторону не проверять (демо на себе).
+    /// </param>
+    private void ShowSignal(Character me, Vector3? aimPoint)
     {
         EnsureSignal();
         var cam = Camera.main;
@@ -1775,6 +1784,19 @@ public partial class Plugin : BaseUnityPlugin
         var viewer = ActiveCamera();
         Vector3 lookFrom = viewer != null ? viewer.transform.position
             : (cam != null ? cam.transform.position : pos - Vector3.forward);
+        // Смотрящий позади зеркала вспышку видеть не должен: с его стороны это глухая
+        // задняя стенка. Блик на самом диске это правило знал с самого начала (Billboard),
+        // а вспышка — нет, и носитель видел у себя в руках звезду, светя от себя.
+        if (aimPoint.HasValue)
+        {
+            Vector3 face = aimPoint.Value - pos;
+            if (face.sqrMagnitude > 1e-4f && Vector3.Dot(lookFrom - pos, face.normalized) <= 0f)
+            {
+                HideSignal();
+                return;
+            }
+        }
+
         _signal.transform.rotation = Quaternion.LookRotation(pos - lookFrom);
         // Здесь и сидел остаток мерцания. Эта синусоида — 0.7..1.0 на частоте 12 рад/с,
         // то есть размах 30% с периодом ровно 0.52 с, замеренным на записи. Она качала
@@ -1957,7 +1979,8 @@ public partial class Plugin : BaseUnityPlugin
         }
 
         // Блик на зеркале бота — ровно тот, что ты увидел бы от живого обидчика.
-        ShowSignal(bot);
+        // Лицевая сторона зеркала смотрит тебе в глаза, значит вспышку ты видишь.
+        ShowSignal(bot, eyes);
 
         // Засвет экрана: источник — рука бота, а не твоя. Ради этого всё и затевалось.
         _lastLocalHitTime = Time.time;
