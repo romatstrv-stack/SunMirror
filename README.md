@@ -59,9 +59,10 @@ ten without it.
 `BepInEx/config/Roman.SunMirror.cfg`, or an in-game config manager.
 
 - **Spot** — `Size`, `SpreadPerMeter`, `SpriteBrightness`, `ContrastRing`:
-  size, punch and edge contrast of the light spot. `SignalLightBrightness`: the
-  glint other players see on your mirror. Turn it down if the scene dims while
-  you aim — the game's auto-exposure is metering it.
+  size, punch and edge contrast of the light spot. `SignalLightBrightness`: an actual
+  lamp on your mirror, off by default. It lit up the ground and walls around
+  you — a second light source where there should only be the glare. Turn it up
+  only if you want the mirror visible from far away at that price.
 - **Emote** — `MaxBlindSeconds`, `FallAtMaxBlind`, `EyesOnly`, `BlindSfxName`:
   how long the daze lasts, whether the victim drops, whether only eye hits
   count, and the sound on contact.
