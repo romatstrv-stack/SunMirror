@@ -3961,12 +3961,26 @@ public partial class Plugin : BaseUnityPlugin
             {
                 // Оба клиента на одной машине берут Photon UserId из одного SteamID,
                 // и второму Photon отказывает: «UserId already joined the specified game».
-                // Поэтому гостю выдаём собственный идентификатор и перезаходим с ним.
                 string baseId = PhotonNetwork.AuthValues != null ? PhotonNetwork.AuthValues.UserId : "guest";
-                _guestUserId = baseId + "-sm2";
-                Log.LogWarning($"[F7] UserId совпадает с хостом ('{baseId}'). Отключаюсь и зайду как '{_guestUserId}'.");
-                PhotonNetwork.Disconnect();
-                return;
+
+                // Если приписка уже стоит, идентификатор свой с самого подключения:
+                // UserIdSuffixPatch отработал на сеттере AuthValues. Рвать связь в этом
+                // случае незачем — раньше F7 делал это всегда и сам себе мешал.
+                // Смотрим на флаг патча, а НЕ на AuthValues: после аутентификации
+                // сервер возвращает туда голый SteamID, и чтение обратно врёт.
+                if (UserIdSuffixPatch.Applied)
+                {
+                    _guestUserId = baseId;
+                    Log.LogWarning($"[F7] Приписка уже поставлена патчем. AuthValues='{baseId}', " +
+                                   $"LocalPlayer.UserId='{PhotonNetwork.LocalPlayer?.UserId}'. Вхожу без перезахода.");
+                }
+                else
+                {
+                    _guestUserId = baseId + "-sm2";
+                    Log.LogWarning($"[F7] UserId как у хоста ('{baseId}'). Отключаюсь и зайду как '{_guestUserId}'.");
+                    PhotonNetwork.Disconnect();
+                    return;
+                }
             }
 
             Log.LogWarning($"[F7] GameVersion='{PhotonNetwork.GameVersion}' " +
