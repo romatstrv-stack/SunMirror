@@ -227,7 +227,7 @@ public partial class Plugin : BaseUnityPlugin
         _blindHoldSeconds = Config.Bind("Emote", "BlindHoldSeconds", 6f, "Сколько держится ослепление после попадания зайчика в глаза.");
         _poseFreezeDelay = Config.Bind("Emote", "PoseFreezeDelay", 0.55f, "Через сколько секунд после начала эмоута заморозить позу (руки у глаз).");
         _rigAimTime    = Config.Bind("Debug", "RigAimSeconds", 1.0f, "Сколько зеркало-стенд наводит зайчика до ослепления.");
-        _debugKeys = Config.Bind("Debug", "DebugKeys", false, "Отладочные клавиши (B K L J C H U N P M O F5-F12 и подстройка наклона). По умолчанию выключены: обычному игроку они не нужны.");
+        _debugKeys = Config.Bind("Debug", "DebugKeys", false, "Отладочные клавиши: F1-F12, B C H J K L M N O P U V Y, 0, запятая и точка, скобки/-/= и нумпад (наклон диска). По умолчанию выключены: обычному игроку они не нужны.");
         _freezeNoon    = Config.Bind("Debug", "FreezeNoon", false,
             "Держать игровое время на полудне. Для отладки и съёмки: иначе солнце садится посреди работы и зайчик перестаёт работать.");
         _autoJoinRoom = Config.Bind("Debug", "AutoJoinHandshakeRoom", false,
@@ -652,7 +652,10 @@ public partial class Plugin : BaseUnityPlugin
         if (kb[Key.U].wasPressedThisFrame) EmergencyUnstick();   // застрял (старый баг) — отлипнуть
         if (kb[Key.P].wasPressedThisFrame) DebugBoardFlight();  // сразу вылететь на остров (отладка)
         if (kb[Key.M].wasPressedThisFrame) DebugNoon();
-        if (kb[Key.G].wasPressedThisFrame) DumpPrefabs();
+        // Не G: Controls/EquipKey по умолчанию тоже G, и одно нажатие делало
+        // сразу два дела — брало зеркало и сыпало дамп. F1 была единственной
+        // свободной функциональной клавишей.
+        if (kb[Key.F1].wasPressedThisFrame) DumpPrefabs();
         if (kb[Key.V].wasPressedThisFrame) DebugCycleGlow();
         if (kb[Key.Y].wasPressedThisFrame) DebugBotBlindsMe();  // бот берёт зеркало и светит В ТЕБЯ
         if (kb[Key.F2].wasPressedThisFrame)
