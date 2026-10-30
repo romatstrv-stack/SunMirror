@@ -25,7 +25,7 @@
     -->
     <ThunderstoreWebsite>https://github.com/romatstrv-stack/SunMirror</ThunderstoreWebsite>
     <ThunderstoreCommunities>peak</ThunderstoreCommunities>
-    <ThunderstoreCategories>mods</ThunderstoreCategories>
+    <ThunderstoreCategories>items;mods;all;afflictions</ThunderstoreCategories>
   </PropertyGroup>
 
   <!--
