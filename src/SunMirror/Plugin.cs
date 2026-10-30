@@ -105,6 +105,12 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<bool> _autoJoinRoom = null!;
     private ConfigEntry<bool> _freezeNoon = null!;
     private string? _guestUserId;   // свой Photon UserId для второго клиента на той же машине
+    // Регион, в котором сидит хост. Ловится при первом нажатии F7, пока соединение
+    // ещё живо: дальше гость НАМЕРЕННО рвёт связь, чтобы перезайти под своим
+    // UserId, и PhotonNetwork.CloudRegion после разрыва пустеет. Без запомненного
+    // значения второй заход уходил в регион '' и не подключался никуда —
+    // на этом стенд и стоял, пока его ни разу не запускали.
+    private string _handshakeRegion = "";
     private ConfigEntry<float> _signalGrow = null!;
     private ConfigEntry<float> _signalMax = null!;
     private ConfigEntry<float> _signalLightBright = null!;
@@ -3893,7 +3899,11 @@ public partial class Plugin : BaseUnityPlugin
                 js.RoomName = name;
                 // Тот же регион, что и сейчас — тогда игра идёт прямо в JoinRoom,
                 // без переподключения к другому облаку.
-                js.RegionToJoin = PhotonNetwork.CloudRegion;
+                if (!string.IsNullOrEmpty(PhotonNetwork.CloudRegion))
+                    _handshakeRegion = PhotonNetwork.CloudRegion;
+                js.RegionToJoin = !string.IsNullOrEmpty(PhotonNetwork.CloudRegion)
+                    ? PhotonNetwork.CloudRegion
+                    : _handshakeRegion;
                 Log.LogWarning($"[F7] Состояние -> JoinSpecificRoomState, комната '{name}', регион '{js.RegionToJoin}'.");
             }
             else
@@ -3921,12 +3931,28 @@ public partial class Plugin : BaseUnityPlugin
                 }
                 else
                 {
-                    // Версию приложения игра уже выставила при первом подключении —
-                    // это статические поля, они сохранились. Теперь заходим под своим UserId.
-                    PhotonNetwork.AuthValues = new Photon.Realtime.AuthenticationValues(_guestUserId);
+                    // Объект аутентификации НЕ подменяем целиком: игра кладёт в него
+                    // данные Steam, и Photon без них отказывает в подключении — именно
+                    // на этом рукопожатие и застревало, бесконечно повторяя «переподключаюсь».
+                    // Меняем ровно одно поле: идентификатор.
+                    if (PhotonNetwork.AuthValues != null)
+                        PhotonNetwork.AuthValues.UserId = _guestUserId;
+                    else
+                        PhotonNetwork.AuthValues = new Photon.Realtime.AuthenticationValues(_guestUserId);
                     PhotonNetwork.NickName = "SunMirror-гость";
-                    Log.LogWarning($"[F7] Переподключаюсь со своим UserId '{_guestUserId}'.");
-                    PhotonNetwork.ConnectUsingSettings();
+                    // Без явного региона ConnectUsingSettings уходит выбирать лучший по пингу
+                    // и может сесть не туда, где комната хоста. Комнаты видны только внутри
+                    // своего региона, так что промах здесь выглядит как «комната не найдена».
+                    if (!string.IsNullOrEmpty(_handshakeRegion))
+                    {
+                        PhotonNetwork.PhotonServerSettings.AppSettings.FixedRegion = _handshakeRegion;
+                        Log.LogWarning($"[F7] Регион прибит к '{_handshakeRegion}'.");
+                    }
+                    Log.LogWarning($"[F7] Переподключаюсь со своим UserId '{_guestUserId}' " +
+                                   $"(аутентификация={(PhotonNetwork.AuthValues != null ? "игры" : "своя")}).");
+                    // Метод игры, а не голый ConnectUsingSettings: он выставляет GameVersion
+                    // и AppVersion, без которых комнаты хоста просто не видно.
+                    NetworkingUtilities.ConnectToNetwork();
                 }
                 return;
             }

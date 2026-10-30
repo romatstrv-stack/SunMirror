@@ -1,4 +1,4 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 using Photon.Realtime;
 
 namespace SunMirror;
@@ -29,11 +29,21 @@ internal static class UserIdSuffixPatch
     [HarmonyPostfix]
     private static void Postfix(AuthenticationValues __result)
     {
-        if (string.IsNullOrEmpty(Suffix) || __result == null) return;
-        if (string.IsNullOrEmpty(__result.UserId)) return;
+        if (string.IsNullOrEmpty(Suffix)) return;
+        if (__result == null)
+        {
+            Plugin.Log?.LogWarning("[ID] LoadUserID вернул null — приписку ставить некуда.");
+            return;
+        }
+        if (string.IsNullOrEmpty(__result.UserId))
+        {
+            Plugin.Log?.LogWarning("[ID] LoadUserID вернул пустой UserId — приписку ставить некуда.");
+            return;
+        }
         // Проверка на хвост: LoadUserID могут позвать несколько раз за сессию,
         // и без неё приписка наросла бы в «...-sm2-sm2-sm2».
         if (__result.UserId.EndsWith(Suffix)) return;
         __result.UserId += Suffix;
+        Plugin.Log?.LogWarning($"[ID] LoadUserID: приписка поставлена, UserId='{__result.UserId}'.");
     }
 }
