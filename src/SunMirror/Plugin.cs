@@ -128,6 +128,8 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _chargeDrain = null!;
     private ConfigEntry<bool> _rootVictim = null!, _spiralEyesNet = null!;
     private ConfigEntry<float> _rootRepeat = null!;
+    private ConfigEntry<string> _blindStatusType = null!;
+    private ConfigEntry<float> _blindStatusAmount = null!;
     private ConfigEntry<float> _lightReach = null!;
     private ConfigEntry<bool> _useLight = null!;
     private ConfigEntry<bool> _backPlate = null!, _ownIcon = null!;
@@ -286,6 +288,18 @@ public partial class Plugin : BaseUnityPlugin
             "хватало, чтобы уйти из-под луча и больше не быть прибитым ни разу. " +
             "Потолок в 4 секунды и пауза после него работают по-прежнему, так что " +
             "окно для побега у жертвы остаётся.");
+        _blindStatusType = Config.Bind("Emote", "BlindStatusType", "Drowsy",
+            "Какое состояние игры навешивать ослеплённому: Injury, Hunger, Cold, Poison, Crab, " +
+            "Curse, Drowsy, Weight, Hot, Thorns, Spores, Web, Arrow, Petrify, FlyTrap. " +
+            "Drowsy выбран по умолчанию как самый безобидный: он сам стекает со временем. " +
+            "Spores опасен — при 0.5 начинается превращение в зомби.");
+        _blindStatusAmount = Config.Bind("Emote", "BlindStatusAmount", 0f,
+            "Сколько состояния добавлять в НАЧАЛЕ каждого ослепления. 0 — не добавлять. " +
+            "Это единственный известный способ дать игроку БЕЗ мода экранный эффект, звук и " +
+            "частицы: RPCA_Stick несёт состояние пятым аргументом и зовёт AddStatus с " +
+            "fromRPC: true на клиенте жертвы, а тот сам рисует эффект, потому что персонаж " +
+            "жертвы для её клиента локальный. По умолчанию выключено: состояния в PEAK " +
+            "наносят настоящий урон и копятся, так что величину подбирать с малого.");
         _chargeDrain = Config.Bind("Emote", "BlindChargeDrain", 0.5f,
             "Как быстро стекает накопленное ослепление, когда луч ушёл с глаз (доля от реального времени). 1.0 — стекает ровно столько же, сколько копилось; 0 — не стекает вовсе, цель запоминает всё.");
         // Свой звук синтезируем в рантайме: ни один из 885 звуков игры не подошёл,
@@ -3022,7 +3036,12 @@ public partial class Plugin : BaseUnityPlugin
         RootVictim(victim, quiet: true);
     }
 
-    private void RootVictim(Character victim, bool quiet = false)
+    /// <param name="withStatus">
+    /// Добавить состояние игры вместе с прибитием. Ставится ТОЛЬКО в начале ослепления:
+    /// повторные прибития идут с нулём, иначе состояние копилось бы пять раз за эпизод
+    /// и «зайчик» убивал бы человека.
+    /// </param>
+    private void RootVictim(Character victim, bool quiet = false, bool withStatus = false)
     {
         if (!_rootVictim.Value || victim == null) return;
         if (victim.data != null && victim.data.isClimbing) return;
@@ -3036,8 +3055,26 @@ public partial class Plugin : BaseUnityPlugin
             if (rig == null) return;
             Vector3 pos = rig.position;
             // Ставим туда же, где часть тела и так находится: никакого рывка.
-            view.RPC("RPCA_Stick", RpcTarget.All, BodypartType.Hip, pos, pos,
-                     CharacterAfflictions.STATUSTYPE.Injury, 0f);
+            // Пятый и шестой аргументы — это и есть канал к игроку без мода.
+            // RPCA_Stick на его клиенте зовёт AddStatus(type, amount, fromRPC: true),
+            // а тот при amount > 0 играет звук, частицы и ЭКРАННЫЙ эффект: проверка
+            // внутри (character.IsLocal && character == observedCharacter) на клиенте
+            // жертвы истинна. Это обходит SyncAfflictionsRPC, который жертва отбрасывает.
+            var stype = CharacterAfflictions.STATUSTYPE.Injury;
+            float amount = 0f;
+            if (withStatus && _blindStatusAmount.Value > 0f)
+            {
+                if (System.Enum.TryParse(_blindStatusType.Value, ignoreCase: true, out CharacterAfflictions.STATUSTYPE parsed))
+                {
+                    stype = parsed;
+                    amount = _blindStatusAmount.Value;
+                }
+                else Log.LogWarning($"BlindStatusType '{_blindStatusType.Value}' не разобран — состояние не навешано.");
+            }
+
+            view.RPC("RPCA_Stick", RpcTarget.All, BodypartType.Hip, pos, pos, stype, amount);
+            if (amount > 0f && !quiet)
+                Log.LogInfo($"Состояние '{stype}' {amount:0.00} отправлено '{victim.name}' через RPCA_Stick.");
             if (!quiet)
                 Log.LogInfo($"Прибил '{victim.name}' на месте (RPCA_Stick, урона нет). " +
                             "Игра отпустит сама через 4 с или раньше, если жертва прыгает.");
@@ -3177,7 +3214,7 @@ public partial class Plugin : BaseUnityPlugin
             _reactionAt[rkey] = Time.time;
             FlinchHead(victim);
             PlayBlindSfx(victim);
-            RootVictim(victim);
+            RootVictim(victim, withStatus: true);
             SpiralEyesForEveryone(victim, true);
         }
         Log.LogInfo($"Blind begin on {victim.name} (всего целей: {_blinds.Count}" +
