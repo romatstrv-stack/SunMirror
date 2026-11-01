@@ -1,4 +1,4 @@
-# Sun Mirror ☀️🪞
+﻿# Sun Mirror ☀️🪞
 
 Catch the sun with a frisbee and blind your teammate with the reflection.
 
@@ -68,6 +68,17 @@ ten without it.
   count, and the sound on contact.
 - **Emote** — `VanillaFlinchForce`: the head flinch that reaches players
   without the mod. Keep it low; high values knock people over.
+- **Emote** — `RootRepeatSeconds`: how often the victim is pinned again while
+  you keep the beam on them. The game lets a stuck player work free by jumping,
+  and the mod used to pin them only once, so anyone could simply hop away. Set
+  it to `0` for that old behaviour. The four-second cap and the pause after it
+  are untouched, so the victim always gets a window to escape.
+- **Emote** — `BlindStatusType`, `BlindStatusAmount`: experimental, **off by
+  default**. The game can show a status effect on the victim screen, with sound
+  and particles, even when they do not have the mod. These two settings switch
+  it on. Start small: statuses in PEAK do real damage and they stack. `Drowsy`
+  is the gentlest, it drains by itself. Do not use `Spores` — at 0.5 the victim
+  starts turning into a zombie.
 - **Reflection** — `RealMirror`, `RealMirrorResolution`: the actual mirror
   surface. Lower the resolution if you are tight on performance.
 - **Model** — `FlashEmission`, `FlashPulseAmount`: how brightly the mirror
