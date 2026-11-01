@@ -1,4 +1,4 @@
-﻿# Sun Mirror ☀️🪞
+# Sun Mirror ☀️🪞
 
 Catch the sun with a frisbee and blind your teammate with the reflection.
 
