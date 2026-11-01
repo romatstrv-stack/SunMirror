@@ -127,6 +127,7 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _reactionEvery = null!;
     private ConfigEntry<float> _chargeDrain = null!;
     private ConfigEntry<bool> _rootVictim = null!, _spiralEyesNet = null!;
+    private ConfigEntry<float> _rootRepeat = null!;
     private ConfigEntry<float> _lightReach = null!;
     private ConfigEntry<bool> _useLight = null!;
     private ConfigEntry<bool> _backPlate = null!, _ownIcon = null!;
@@ -148,6 +149,9 @@ public partial class Plugin : BaseUnityPlugin
     // Накопленное ослепление по цели: сколько «фитиля» догорело.
     private readonly Dictionary<int, (float charge, float at)> _blindCharge = new();
     private readonly Dictionary<int, float> _reactionAt = new();
+    // Когда жертву прибивали в последний раз. Нужно, чтобы прибивать заново,
+    // пока держится луч: игра даёт сбросить удержание прыжком.
+    private readonly Dictionary<int, float> _rootAt = new();
     private ConfigEntry<float> _poseLoopSpeed = null!, _poseLoopSpan = null!;
     private ConfigEntry<string> _mirrorItemName = null!, _sfxFilter = null!;
     private ConfigEntry<float> _eyesRadius = null!;
@@ -274,6 +278,14 @@ public partial class Plugin : BaseUnityPlugin
             "Показывать спиральные глаза и игрокам БЕЗ мода, родным методом игры. Рот так передать нельзя — у него сетевого пути нет, он остаётся только у владельцев мода.");
         _rootVictim = Config.Bind("Emote", "RootVictim", true,
             "Прибивать ослеплённого на месте штатным механизмом игры (RPCA_Stick). Это единственное обездвиживание, которое видит игрок без мода. Игра сама отпускает через 4 секунды. На карабкающихся не применяется.");
+        _rootRepeat = Config.Bind("Emote", "RootRepeatSeconds", 0.8f,
+            "Как часто прибивать жертву заново, пока луч держится на глазах. " +
+            "0 — прибивать один раз, как было до 0.1.15. " +
+            "Зачем: в PEAK прыжок приближает освобождение (jumpAction -> JumpStickEffect " +
+            "прибавляет к счётчику 0.5-1.5 с при пороге 4 с), поэтому двух-трёх прыжков " +
+            "хватало, чтобы уйти из-под луча и больше не быть прибитым ни разу. " +
+            "Потолок в 4 секунды и пауза после него работают по-прежнему, так что " +
+            "окно для побега у жертвы остаётся.");
         _chargeDrain = Config.Bind("Emote", "BlindChargeDrain", 0.5f,
             "Как быстро стекает накопленное ослепление, когда луч ушёл с глаз (доля от реального времени). 1.0 — стекает ровно столько же, сколько копилось; 0 — не стекает вовсе, цель запоминает всё.");
         // Свой звук синтезируем в рантайме: ни один из 885 звуков игры не подошёл,
@@ -2979,7 +2991,38 @@ public partial class Plugin : BaseUnityPlugin
         }
     }
 
-    private void RootVictim(Character victim)
+    /// <summary>
+    /// Держать жертву прибитой, пока светит луч.
+    ///
+    /// Зачем. Прибивали один раз на начало реакции — и этого оказалось мало.
+    /// Проверка на живом игроке без мода (1 ноября) показала: человек спокойно
+    /// уходил в сторону, останавливаясь лишь на секунду анимации эмоута.
+    /// Причина в самой игре: jumpAction подписан на JumpStickEffect, который за
+    /// каждый прыжок прибавляет к счётчику удержания случайные 0.5-1.5 секунды
+    /// при пороге в 4 секунды. Два-три прыжка — и свободен навсегда, потому что
+    /// заново его никто не прибивал.
+    ///
+    /// Сначала снимаем своё старое крепление, потом ставим новое: RPCA_Stick,
+    /// вызванный поверх существующего, навесил бы на ту же часть тела второй
+    /// ConfigurableJoint, и они копились бы всё время удержания.
+    ///
+    /// Побег этим не отменяется. Потолок в 4 секунды обрывает ослепление сам, и
+    /// после него по этой цели ничего не проходит ещё 4 секунды — окно, чтобы
+    /// уйти, остаётся. Отключается RootRepeatSeconds = 0.
+    /// </summary>
+    private void TickRoot(Character victim, int vkey)
+    {
+        if (!_rootVictim.Value || _rootRepeat.Value <= 0f) return;
+        if (victim.data != null && victim.data.isClimbing) return;
+
+        if (_rootAt.TryGetValue(vkey, out float last) && Time.time - last < _rootRepeat.Value) return;
+        _rootAt[vkey] = Time.time;
+
+        UnrootVictim(victim);
+        RootVictim(victim, quiet: true);
+    }
+
+    private void RootVictim(Character victim, bool quiet = false)
     {
         if (!_rootVictim.Value || victim == null) return;
         if (victim.data != null && victim.data.isClimbing) return;
@@ -2995,8 +3038,9 @@ public partial class Plugin : BaseUnityPlugin
             // Ставим туда же, где часть тела и так находится: никакого рывка.
             view.RPC("RPCA_Stick", RpcTarget.All, BodypartType.Hip, pos, pos,
                      CharacterAfflictions.STATUSTYPE.Injury, 0f);
-            Log.LogInfo($"Прибил '{victim.name}' на месте (RPCA_Stick, урона нет). " +
-                        "Игра отпустит сама через 4 с.");
+            if (!quiet)
+                Log.LogInfo($"Прибил '{victim.name}' на месте (RPCA_Stick, урона нет). " +
+                            "Игра отпустит сама через 4 с или раньше, если жертва прыгает.");
         }
         catch (System.Exception e) { Log.LogWarning($"RPCA_Stick не прошёл: {e.GetType().Name}: {e.Message}"); }
     }
@@ -3525,6 +3569,7 @@ public partial class Plugin : BaseUnityPlugin
             AddCharge(vkey, Time.deltaTime);
             if (TryFireCap(victim, vkey)) continue;
             Wobble(victim, st);
+            TickRoot(victim, vkey);
 
             var cc = victim.GetComponentInChildren<CharacterCustomization>();
             if (cc != null)
