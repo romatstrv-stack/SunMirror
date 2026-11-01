@@ -280,9 +280,11 @@ public partial class Plugin : BaseUnityPlugin
         _spiralEyesNet = Config.Bind("Emote", "SpiralEyesForEveryone", true,
             "Показывать спиральные глаза и игрокам БЕЗ мода, родным методом игры. Рот так передать нельзя — у него сетевого пути нет, он остаётся только у владельцев мода.");
         _rootVictim = Config.Bind("Emote", "RootVictim", true,
-            "Обездвиживать ослеплённого штатным механизмом игры (RPCA_Fall): тело перестаёт " +
-            "слушаться, экран ведёт пост-эффектом, камеру трясёт. Работает у игрока БЕЗ мода. " +
-            "Урона нет. На карабкающихся и висящих в воздухе не применяется.");
+            "Обездвиживать ослеплённого штатными механизмами игры. Работает у игрока БЕЗ мода, " +
+            "урона не наносит. На земле идёт RPCA_Fall: тело перестаёт слушаться, у жертвы " +
+            "полноэкранный пост-эффект игры и тряска камеры. На стене и в воздухе — RPCA_Stick: " +
+            "держит на месте жёстко, не роняя, плюс тряска. Ронять висящего нельзя: в игре про " +
+            "подъём на гору это означает сорваться.");
         _rootRepeat = Config.Bind("Emote", "RootRepeatSeconds", 0.5f,
             "Как часто обновлять обездвиживание, пока луч держится на глазах. 0 — один раз. " +
             "Счётчик падения в игре стекает примерно по секунде в секунду на земле, поэтому " +
@@ -3044,14 +3046,22 @@ public partial class Plugin : BaseUnityPlugin
     {
         if (!_rootVictim.Value || victim == null) return;
 
-        // Карабкающихся не трогаем: отнять управление телом на стене — значит сбросить
-        // человека. В воздухе — тоже: там счётчик падения стекает в пять раз медленнее,
-        // и один луч превратился бы в долгий полёт вниз.
-        var d = victim.data;
-        if (d != null && (d.isClimbingAnything || !d.isGrounded)) return;
-
         var view = victim.photonView;
         if (view == null || view.ViewID == 0) return;
+
+        // Механизм выбирается по тому, где человек находится, и обездвижен он будет
+        // в любом случае. Ронять того, кто висит на стене или в воздухе, нельзя:
+        // RPCA_Fall обнуляет контроль над телом, и в игре про подъём на гору это
+        // означает сорваться. Но и отпускать его просто так незачем.
+        //
+        // Для таких — RPCA_Stick: ConfigurableJoint с запертым перемещением и
+        // свободным вращением, без connectedBody, то есть крепление к миру. Человек
+        // остаётся жёстким и висит там, где был; состояние климба игра при этом не
+        // трогает вовсе. Падения нет, и даже наоборот — пока крепление держит,
+        // HandleStickUpdate каждый кадр зовёт ClampSinceGrounded(0.5f), так что
+        // счётчик полёта не растёт и урон от падения не копится.
+        var d = victim.data;
+        bool offGround = d != null && (d.isClimbingAnything || !d.isGrounded);
 
         try
         {
@@ -3065,17 +3075,7 @@ public partial class Plugin : BaseUnityPlugin
             // Прыжком это не обойти, в отличие от RPCA_Stick: при нулевом контроле
             // прыгать нечем, а JumpStickEffect к падению не подписан.
             float secs = Mathf.Max(0.1f, _rootFallSecs.Value);
-            view.RPC("RPCA_Fall", RpcTarget.All, secs, 0f);
-
-            // Тряска — отдельным адресным вызовом. GamefeelHandler.instance синглтон,
-            // так что общий вызов с shake > 0 затряс бы камеры всем в лобби, включая
-            // тех, кто вообще ни при чём. Второй вызов счётчик не понижает: внутри
-            // стоит if (seconds > data.fallSeconds).
-            if (_rootFallShake.Value > 0f && view.Owner != null)
-                view.RPC("RPCA_Fall", view.Owner, secs, _rootFallShake.Value);
-
-            if (!quiet)
-                Log.LogInfo($"Обездвижил '{victim.name}' на {secs:0.0} с (RPCA_Fall, урона нет).");
+            float shake = Mathf.Max(0f, _rootFallShake.Value);
 
             // Состояние игры — отдельный канал, по умолчанию выключен. Единственный
             // способ дать игроку БЕЗ мода ещё и звук с частицами: RPCA_Stick несёт
@@ -3083,37 +3083,86 @@ public partial class Plugin : BaseUnityPlugin
             // клиенте жертвы, а тот сам играет эффекты, потому что её персонаж для
             // её клиента локальный. Обходит SyncAfflictionsRPC, который жертва
             // отбрасывает (if (character.IsLocal) return).
-            if (withStatus && _blindStatusAmount.Value > 0f)
-                SendBlindStatus(victim);
+            float amount = (withStatus && _blindStatusAmount.Value > 0f)
+                           ? _blindStatusAmount.Value : 0f;
+
+            if (offGround)
+            {
+                StickVictim(victim, amount);
+
+                // Тряска без падения. seconds = 0 счётчик не поднимает — внутри стоит
+                // if (seconds > data.fallSeconds), — а AddPerlinShake зовётся всё равно.
+                // Получается чистая тряска камеры, без обмякшего тела и без пост-эффекта.
+                if (shake > 0f && view.Owner != null)
+                    view.RPC("RPCA_Fall", view.Owner, 0f, shake);
+
+                if (!quiet)
+                    Log.LogInfo($"Прибил '{victim.name}' на месте (RPCA_Stick): " +
+                                (d != null && d.isClimbingAnything ? "висит на стене" : "в воздухе") +
+                                " — ронять нельзя. Игра отпустит сама через 4 с.");
+                return;
+            }
+
+            // Канал обездвиживания на земле. RPCA_Fall у игры вообще без проверки
+            // владельца, и на клиенте жертвы делает три вещи сразу:
+            //   data.fallSeconds = seconds -> GetTargetRagdollControll() возвращает 0,
+            //                                 тело обмякает (как у потерявшего сознание);
+            //   fallSeconds > 0            -> FallPost поднимает вес Volume, и у жертвы
+            //                                 идёт полноэкранный пост-эффект самой игры;
+            //   AddPerlinShake(shake)      -> тряска камеры.
+            // Прыжком это не обойти, в отличие от прибития: при нулевом контроле
+            // прыгать нечем, а JumpStickEffect к падению не подписан.
+            view.RPC("RPCA_Fall", RpcTarget.All, secs, 0f);
+
+            // Тряска — отдельным адресным вызовом. GamefeelHandler.instance синглтон,
+            // так что общий вызов с shake > 0 затряс бы камеры всем в лобби, включая
+            // тех, кто вообще ни при чём. Второй вызов счётчик не понижает: внутри
+            // стоит if (seconds > data.fallSeconds).
+            if (shake > 0f && view.Owner != null)
+                view.RPC("RPCA_Fall", view.Owner, secs, shake);
+
+            if (!quiet)
+                Log.LogInfo($"Обездвижил '{victim.name}' на {secs:0.0} с (RPCA_Fall, урона нет).");
+
+            if (amount > 0f) StickVictim(victim, amount);
         }
-        catch (System.Exception e) { Log.LogWarning($"RPCA_Fall не прошёл: {e.GetType().Name}: {e.Message}"); }
+        catch (System.Exception e) { Log.LogWarning($"Обездвиживание не прошло: {e.GetType().Name}: {e.Message}"); }
     }
 
     /// <summary>
-    /// Навесить состояние игры через RPCA_Stick. Вызывается только когда
-    /// BlindStatusAmount больше нуля. Крепление к бедру здесь побочный эффект:
-    /// игра снимет его сама через 4 секунды, а RestoreBlind чистит раньше.
+    /// Прибить бедро к месту через RPCA_Stick и, если величина больше нуля,
+    /// навесить этим же вызовом состояние игры.
+    ///
+    /// Своё прежнее крепление снимаем первым делом: RPCA_Stick, вызванный поверх
+    /// существующего, добавил бы на ту же часть тела второй ConfigurableJoint, и
+    /// при обновлении каждые полсекунды они копились бы всё удержание.
+    ///
+    /// Игра снимает крепление сама через 4 секунды (HandleStickUpdate), а
+    /// RestoreBlind чистит раньше.
     /// </summary>
-    private void SendBlindStatus(Character victim)
+    /// <param name="statusAmount">0 — только держать, без состояния и без урона.</param>
+    private void StickVictim(Character victim, float statusAmount)
     {
-        if (!System.Enum.TryParse(_blindStatusType.Value, ignoreCase: true,
-                                  out CharacterAfflictions.STATUSTYPE stype))
-        {
-            Log.LogWarning($"BlindStatusType '{_blindStatusType.Value}' не разобран — состояние не навешано.");
-            return;
-        }
-
         var view = victim.photonView;
         var rig = victim.GetBodypartRig(BodypartType.Hip);
         if (view == null || rig == null) return;
-        Vector3 pos = rig.position;   // туда же, где бедро и так есть: без рывка
 
+        var stype = CharacterAfflictions.STATUSTYPE.Injury;
+        if (statusAmount > 0f &&
+            !System.Enum.TryParse(_blindStatusType.Value, ignoreCase: true, out stype))
+        {
+            Log.LogWarning($"BlindStatusType '{_blindStatusType.Value}' не разобран — состояние не навешано.");
+            statusAmount = 0f;
+        }
+
+        Vector3 pos = rig.position;   // туда же, где бедро и так есть: без рывка
         try
         {
-            view.RPC("RPCA_Stick", RpcTarget.All, BodypartType.Hip, pos, pos,
-                     stype, _blindStatusAmount.Value);
-            Log.LogInfo($"Состояние '{stype}' {_blindStatusAmount.Value:0.00} отправлено " +
-                        $"'{victim.name}' через RPCA_Stick.");
+            view.RPC("RPCA_ClearJoint", RpcTarget.All, BodypartType.Hip);
+            view.RPC("RPCA_Stick", RpcTarget.All, BodypartType.Hip, pos, pos, stype, statusAmount);
+            if (statusAmount > 0f)
+                Log.LogInfo($"Состояние '{stype}' {statusAmount:0.00} отправлено " +
+                            $"'{victim.name}' через RPCA_Stick.");
         }
         catch (System.Exception e) { Log.LogWarning($"RPCA_Stick не прошёл: {e.Message}"); }
     }
@@ -3627,6 +3676,121 @@ public partial class Plugin : BaseUnityPlugin
         foreach (var n in usable) Log.LogInfo($"  prefab='{n}'");
         if (usable.Count == 0)
             Log.LogWarning("[G] Ни одного пригодного. Поменяй Debug/PrefabDumpFilter — например на explo, spore, light, flash, star.");
+
+        DumpAfflictionCarriers(all);
+    }
+
+    /// <summary>
+    /// Искать среди префабов те, у которых состояние прописано в полях.
+    ///
+    /// Зачем. У игры ЕСТЬ своё ослепление — Peak.Afflictions.Affliction_Blind. Его
+    /// OnApplied зовёт AddIllegalStatus("BLIND", time), а это поднимает
+    /// IllegalScreenEffect: полноэкранный меш с альфа-маской, затухает за 3 секунды,
+    /// плюс data.isBlind. Ровно то, чего мод хочет с самого начала.
+    ///
+    /// Передать его игроку БЕЗ мода напрямую нечем: ни один из 258 сетевых методов
+    /// игры не несёт тип состояния аргументом. Их два вида, и оба не годятся.
+    /// SyncAfflictionsRPC клиент жертвы отбрасывает первой же строкой
+    /// (if (character.IsLocal) return). А TryAddAfflictionToLocalCharacter,
+    /// RPC_DartImpact и прочие применяют состояние, ПРОПИСАННОЕ В ПРЕФАБЕ, — канал
+    /// адресный и рабочий, но груз в нём чужой.
+    ///
+    /// Значит всё решает один вопрос: есть ли в игре префаб, у которого в полях уже
+    /// лежит ослепление. Поиск по файлам данных ответа не дал — имена полей Unity в
+    /// бинарных ассетах не хранит, — поэтому спрашиваем саму игру в рантайме.
+    ///
+    /// Если такой префаб найдётся, его можно будет просто поставить рядом с жертвой:
+    /// GameUtils.RPC_SpawnResourceAtPosition(resourcePath, pos) тоже [PunRPC] и
+    /// совсем без проверок, а AOE считается на каждом клиенте для своего персонажа —
+    /// то есть жертва ослепит себя сама, настоящим ослеплением игры.
+    /// </summary>
+    private void DumpAfflictionCarriers(GameObject[] all)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var lines = new List<string>();
+        var blind = new List<string>();
+        var seen = new HashSet<string>();
+        int scanned = 0;
+
+        foreach (var g in all)
+        {
+            if (g == null || !seen.Add(g.name)) continue;
+            scanned++;
+
+            try
+            {
+                // Площадные эффекты: у них состояние и «нелегальный статус» лежат
+                // прямо в полях, и ветка под BLIND в AOE.cs собирает Affliction_Blind сама.
+                foreach (var aoe in g.GetComponentsInChildren<AOE>(includeInactive: true))
+                {
+                    if (aoe == null) continue;
+                    string illegal = aoe.illegalStatus ?? "";
+                    string affl = AfflictionName(aoe.hasAffliction ? aoe.affliction : null);
+                    if (illegal.Length == 0 && affl.Length == 0 && aoe.statusAmount == 0f) continue;
+
+                    string line = $"  AOE  prefab='{g.name}' illegalStatus='{illegal}' " +
+                                  $"status={aoe.statusType} amount={aoe.statusAmount:0.00} " +
+                                  $"range={aoe.range:0.0}" + (affl.Length > 0 ? $" affliction={affl}" : "");
+                    lines.Add(line);
+                    if (illegal.ToUpperInvariant() == "BLIND" || affl.Contains("Blind")) blind.Add(line);
+                }
+
+                // Предметы: Action_ApplyAffliction и его наследник Action_ApplyMassAffliction.
+                // У второго есть сетевой метод TryAddAfflictionToLocalCharacter(bool force),
+                // и с force = true он бьёт по адресу, минуя проверку расстояния.
+                foreach (var act in g.GetComponentsInChildren<Action_ApplyAffliction>(includeInactive: true))
+                {
+                    if (act == null) continue;
+                    string affl = AfflictionName(act.affliction);
+                    var extra = new List<string>();
+                    if (act.extraAfflictions != null)
+                        foreach (var e in act.extraAfflictions)
+                        {
+                            string n = AfflictionName(e);
+                            if (n.Length > 0) extra.Add(n);
+                        }
+                    if (affl.Length == 0 && extra.Count == 0) continue;
+
+                    bool mass = act is Action_ApplyMassAffliction;
+                    string line = $"  {(mass ? "MASS" : "ITEM")} prefab='{g.name}' " +
+                                  $"affliction={(affl.Length > 0 ? affl : "-")}" +
+                                  (extra.Count > 0 ? $" extra=[{string.Join(", ", extra.ToArray())}]" : "") +
+                                  (mass ? "  <- есть сетевой TryAddAfflictionToLocalCharacter" : "");
+                    lines.Add(line);
+                    if (affl.Contains("Blind") || extra.Exists(n => n.Contains("Blind"))) blind.Add(line);
+                }
+            }
+            catch (System.Exception e)
+            {
+                Log.LogWarning($"[F1] Префаб '{g.name}' не осмотрен: {e.GetType().Name}: {e.Message}");
+            }
+        }
+
+        lines.Sort();
+        sw.Stop();
+        Log.LogWarning($"[F1] === носители состояний: осмотрено {scanned} префабов, " +
+                       $"найдено {lines.Count} (за {sw.ElapsedMilliseconds} мс) ===");
+        foreach (var l in lines) Log.LogInfo(l);
+
+        if (blind.Count > 0)
+        {
+            Log.LogWarning($"[F1] *** ОСЛЕПЛЕНИЕ НАЙДЕНО, {blind.Count} шт. Это тот самый канал: ***");
+            foreach (var l in blind) Log.LogWarning(l);
+        }
+        else
+        {
+            Log.LogWarning("[F1] Ослепления в полях префабов нет. Значит Affliction_Blind " +
+                           "игроку БЕЗ мода действительно недостижим: сетевого метода, который " +
+                           "несёт тип состояния аргументом, в игре не существует.");
+        }
+    }
+
+    /// <summary>Имя типа состояния или пустая строка. Affliction абстрактный, тип важнее полей.</summary>
+    private static string AfflictionName(Peak.Afflictions.Affliction? a)
+    {
+        if (a == null) return "";
+        try { return $"{a.GetType().Name}({a.GetAfflictionType()})"; }
+        catch { return a.GetType().Name; }
     }
 
     private void DumpSfx()
