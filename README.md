@@ -68,11 +68,16 @@ ten without it.
   count, and the sound on contact.
 - **Emote** — `VanillaFlinchForce`: the head flinch that reaches players
   without the mod. Keep it low; high values knock people over.
-- **Emote** — `RootRepeatSeconds`: how often the victim is pinned again while
-  you keep the beam on them. The game lets a stuck player work free by jumping,
-  and the mod used to pin them only once, so anyone could simply hop away. Set
-  it to `0` for that old behaviour. The four-second cap and the pause after it
-  are untouched, so the victim always gets a window to escape.
+- **Emote** — `RootVictim`, `RootFallSeconds`, `RootFallShake`,
+  `RootRepeatSeconds`: the hold. This runs through the game's own fall state, so
+  a player without the mod goes limp, gets the game's full-screen fall
+  post-effect and a camera shake, and takes no damage at all. Jumping does not
+  get them out of it — unlike the old pin, which anyone could hop free of.
+  `RootFallSeconds` is how long one pulse lasts, and therefore how quickly they
+  get up once you look away; `RootRepeatSeconds` is how often it is refreshed
+  while the beam holds, `0` for a single pulse. The four-second cap and the
+  pause after it are untouched, so the victim always gets a window to escape.
+  Climbers and anyone in mid-air are skipped on purpose.
 - **Emote** — `BlindStatusType`, `BlindStatusAmount`: experimental, **off by
   default**. The game can show a status effect on the victim screen, with sound
   and particles, even when they do not have the mod. These two settings switch
