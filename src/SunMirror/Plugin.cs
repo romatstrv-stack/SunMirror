@@ -818,7 +818,10 @@ public partial class Plugin : BaseUnityPlugin
         var mouse = Mouse.current;
         // основной триггер — держим зеркало (есть viewmodel-клон) и жмём ЛКМ; F — debug-дубль (старый проп)
         bool lmb = mouse != null && mouse.leftButton.isPressed;
-        bool fFallback = _held != null && kb != null && kb[_useKey.Value].isPressed;
+        // Клавиша-дубль должна работать и с новым зеркалом, а не только со старым пропом.
+        // 2 ноября в логе: «F press: held=НЕТ holdingMirror=True active=False» — _held
+        // пуст, когда зеркало взято как viewmodel-клон, и F не делала ничего.
+        bool fFallback = (_held != null || _holdingMirror) && kb != null && kb[_useKey.Value].isPressed;
         bool active = (_holdingMirror && lmb) || fFallback;
 
         if (lmb && !_lmbLogged) { _lmbLogged = true;
