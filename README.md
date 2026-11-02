@@ -2,6 +2,9 @@
 
 Catch the sun with a frisbee and blind your teammate with the reflection.
 
+**Found a bug, or want something changed? [Join the Discord](https://discord.gg/ARuemW9sbB).**
+Thunderstore has no comments, so that is the only place I can actually hear you.
+
 ![Sun Mirror in action](https://raw.githubusercontent.com/romatstrv-stack/SunMirror/master/media/sunmirror-demo.gif)
 
 Pick up a frisbee and hold left mouse button. A bright spot of sunlight crawls

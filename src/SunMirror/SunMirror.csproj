@@ -23,7 +23,7 @@
       Communities: https://thunderstore.io/api/experimental/community/
       Categories: https://thunderstore.io/api/experimental/community/peak/category/
     -->
-    <ThunderstoreWebsite>https://github.com/romatstrv-stack/SunMirror</ThunderstoreWebsite>
+    <ThunderstoreWebsite>https://discord.gg/ARuemW9sbB</ThunderstoreWebsite>
     <ThunderstoreCommunities>peak</ThunderstoreCommunities>
     <ThunderstoreCategories>items;mods;all;afflictions</ThunderstoreCategories>
   </PropertyGroup>
