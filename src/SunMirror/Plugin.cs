@@ -3179,8 +3179,18 @@ public partial class Plugin : BaseUnityPlugin
     /// <summary>
     /// Вернуть жертве управление, не дожидаясь, пока счётчик стечёт сам.
     ///
-    /// RPCA_UnFall обнуляет fallSeconds — и пост-эффект, и обмякшее тело уходят
-    /// вместе с ним.
+    /// RPCA_UnFall здесь НЕ шлём, и это важно. Он обнуляет fallSeconds, то есть
+    /// отменяет любое падение — в том числе то, которое само ослепление только что
+    /// и устроило. В 0.1.16, когда удержание шло падением, он был нужен; с
+    /// возвратом на крепление в 0.1.17 он стал ровно вредом. Снятие по потолку
+    /// идёт так: TryFireCap -> DropVictim (RPCA_Fall на 1.6 с) -> RestoreBlind ->
+    /// сюда. Один кадр, тот же порядок по сети: UnFall приходил последним и
+    /// гасил падение. В игре это выглядело как «через 4 секунды не падает в стан,
+    /// эмоуты прекращаются и можно убежать» (2 ноября). В логе видно прямо:
+    /// «Падение ... на 1,6 с, по сети» и сразу «Blind RESTORE».
+    ///
+    /// Отпускать падение раньше времени и не нужно: fallSeconds стекает сам, а
+    /// удержание держится креплением, которое чистится ниже.
     ///
     /// Крепление чистим ТОЛЬКО своё бедро (RPCA_ClearJoint), а не всё разом:
     /// RPCA_Unstick освободил бы человека и от ловушек игры, в которые он попал
@@ -3193,8 +3203,6 @@ public partial class Plugin : BaseUnityPlugin
         _rootAnchor.Remove(VictimKey(victim));   // следующий эпизод начнёт якорь заново
         var view = victim.photonView;
         if (view == null || view.ViewID == 0) return;
-        try { view.RPC("RPCA_UnFall", RpcTarget.All); }
-        catch (System.Exception e) { Log.LogWarning($"RPCA_UnFall не прошёл: {e.Message}"); }
         try { view.RPC("RPCA_ClearJoint", RpcTarget.All, BodypartType.Hip); }
         catch (System.Exception e) { Log.LogWarning($"RPCA_ClearJoint не прошёл: {e.Message}"); }
     }
