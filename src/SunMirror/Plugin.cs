@@ -32,7 +32,8 @@ public partial class Plugin : BaseUnityPlugin
 
     private ConfigEntry<Key> _equipKey = null!, _useKey = null!, _selfTestKey = null!, _thirdPersonKey = null!, _giveKey = null!;
     private bool _itemsLogged;
-    private bool _lmbLogged;
+    private bool _lmbLogged, _useKeyLogged;
+    private float _lastSpotMissLog;
     private bool _holdingMirror;
     private int _debugLayer;   // 0 всё, 1 без звезды, 2 без блика, 3 без прожектора, 4 всё выкл
 
@@ -230,7 +231,7 @@ public partial class Plugin : BaseUnityPlugin
             "ОПЫТНОЕ, по умолчанию выключено. Тёмный ободок вокруг зайчика: аддитивное пятно на ярком песке не читается, ободок затемняет фон по краю и возвращает контраст. Включать значением 0.3-0.6.");
         _requireSun    = Config.Bind("Spot", "RequireSunlight", true, "Светить только когда солнце падает на игрока (день и не в тени).");
         _fallSeconds   = Config.Bind("Effect", "FallSeconds", 1.6f, "Секунд рэгдолла.");
-        _fallShake     = Config.Bind("Effect", "FallShake", 5f,
+        _fallShake     = Config.Bind("Effect", "FallShake", 10f,
             "Тряска экрана у падающей жертвы. Единицы — как у самой игры: приземление " +
             "зовёт 5, срыв на стене 10, лава 5, удары по интерфейсу до 30. Старое значение " +
             "0.6 было в разы ниже самой слабой штатной тряски, и его просто не чувствовалось. " +
@@ -299,7 +300,7 @@ public partial class Plugin : BaseUnityPlugin
             "Обновление нужно из-за самой игры: jumpAction подписан на JumpStickEffect, и " +
             "каждый прыжок приближает освобождение на 0.5–1.5 с при пороге 4 с. Новое " +
             "крепление счётчик обнуляет, поэтому при 0.5 с напрыгать побег не выходит.");
-        _rootFallShake = Config.Bind("Emote", "RootFallShake", 2.5f,
+        _rootFallShake = Config.Bind("Emote", "RootFallShake", 5f,
             "Сила тряски камеры у жертвы. 0 — без тряски. Шлётся лично ей: тряска в игре " +
             "идёт через синглтон GamefeelHandler, и общим вызовом затрясло бы всё лобби.");
         _blindStatusType = Config.Bind("Emote", "BlindStatusType", "Drowsy",
@@ -823,6 +824,19 @@ public partial class Plugin : BaseUnityPlugin
         if (lmb && !_lmbLogged) { _lmbLogged = true;
             Log.LogInfo($"LMB press: holdingMirror={_holdingMirror} active={active}"); }
         if (!lmb) _lmbLogged = false;   // сбрасываем — каждое нажатие логируется
+
+        // То же для клавиши-дубля. Раньше она не логировалась вовсе, и когда зайчик
+        // пропал (2 ноября), по логу нельзя было отличить «не нажимал» от «нажимал,
+        // но калитка закрыта»: условие active требует либо _holdingMirror и ЛКМ,
+        // либо _held и клавишу. Молчащая калитка — худший вид калитки.
+        bool useKeyDown = kb != null && kb[_useKey.Value].isPressed;
+        if (useKeyDown && !_useKeyLogged)
+        {
+            _useKeyLogged = true;
+            Log.LogInfo($"{_useKey.Value} press: held={(_held != null ? _held.name : "НЕТ")} " +
+                        $"holdingMirror={_holdingMirror} active={active}");
+        }
+        if (!useKeyDown) _useKeyLogged = false;
 
         if (active) UpdateSpot();
         else { HideSpot(); ClearTarget(); _spotHasPos = false; }
@@ -2087,7 +2101,17 @@ public partial class Plugin : BaseUnityPlugin
     {
         var me = Character.localCharacter;
         var cam = Camera.main;
-        if (me == null || cam == null) { HideSpot(); return; }
+        if (me == null || cam == null)
+        {
+            if (Time.time - _lastSpotMissLog > 1f)
+            {
+                Log.LogInfo($"Spot off: {(me == null ? "персонажа нет" : "камеры нет")} " +
+                            "(Character.localCharacter / Camera.main).");
+                _lastSpotMissLog = Time.time;
+            }
+            HideSpot();
+            return;
+        }
 
         Vector3 origin = cam.transform.position;
         Vector3 aim = cam.transform.forward;
@@ -2095,7 +2119,15 @@ public partial class Plugin : BaseUnityPlugin
         // Луч не должен цепляться за наш же предмет в руках: у бинокля остаётся MeshCollider
         // (меши мы прячем, коллайдер нет), и он ловит луч в паре см от камеры.
         if (!RaycastIgnoringHeld(origin, aim, _range.Value, out RaycastHit hit))
-        { HideSpot(); ClearTarget(); _spotHasPos = false; return; }
+        {
+            if (Time.time - _lastSpotMissLog > 1f)
+            {
+                Log.LogInfo($"Spot off: луч ни во что не попал на {_range.Value:0} м " +
+                            "(небо, вода, слишком далеко).");
+                _lastSpotMissLog = Time.time;
+            }
+            HideSpot(); ClearTarget(); _spotHasPos = false; return;
+        }
 
         // Попал в зеркало? Тогда цель = ты сам (наводишься на своё отражение),
         // и солнце можно не проверять (ты ловишь через зеркало, в помещении).
