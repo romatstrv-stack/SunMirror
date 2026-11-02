@@ -68,23 +68,19 @@ ten without it.
   count, and the sound on contact.
 - **Emote** — `VanillaFlinchForce`: the head flinch that reaches players
   without the mod. Keep it low; high values knock people over.
-- **Emote** — `RootVictim`, `RootFallSeconds`, `RootFallShake`,
-  `RootRepeatSeconds`: the hold. It runs through the game's own mechanics, so it
-  reaches a player without the mod, and it does no damage at all.
-
-  On the ground the victim goes limp, gets the game's full-screen fall
-  post-effect and a camera shake. Jumping does not get them out of it — unlike
-  the old pin, which anyone could simply hop free of.
-
-  On a wall or in mid-air they are pinned in place instead, rigid, and still get
-  the shake. Dropping someone who is climbing would send them off the mountain,
+- **Emote** — `RootVictim`, `RootFallShake`, `RootRepeatSeconds`: the hold. It
+  runs through the game's own mechanics, so it reaches a player without the mod,
+  and it does no damage at all. The victim is pinned where they stand — rigid,
+  so the pose and the flinching stay visible — and gets a camera shake. Someone
+  on a wall is pinned too, not dropped: a fall would send them off the mountain,
   and while the pin holds the game keeps their airtime counter at zero, so no
-  fall damage builds up either.
+  fall damage builds up.
 
-  `RootFallSeconds` is how long one pulse lasts, and therefore how quickly they
-  get up once you look away; `RootRepeatSeconds` is how often it is refreshed
-  while the beam holds, `0` for a single pulse. The four-second cap and the
-  pause after it are untouched, so the victim always gets a window to escape.
+  `RootRepeatSeconds` is how often the pin is refreshed while the beam holds,
+  `0` for a single pin. Refreshing matters because the game lets a pinned player
+  work loose by jumping, and each new pin resets that. The four-second cap and
+  the pause after it are untouched, so the victim always gets a window to
+  escape.
 - **Emote** — `BlindStatusType`, `BlindStatusAmount`: experimental, **off by
   default**. The game can show a status effect on the victim screen, with sound
   and particles, even when they do not have the mod. These two settings switch

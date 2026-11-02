@@ -128,7 +128,7 @@ public partial class Plugin : BaseUnityPlugin
     private ConfigEntry<float> _chargeDrain = null!;
     private ConfigEntry<bool> _rootVictim = null!, _spiralEyesNet = null!;
     private ConfigEntry<float> _rootRepeat = null!;
-    private ConfigEntry<float> _rootFallSecs = null!, _rootFallShake = null!;
+    private ConfigEntry<float> _rootFallShake = null!;
     private ConfigEntry<string> _blindStatusType = null!;
     private ConfigEntry<float> _blindStatusAmount = null!;
     private ConfigEntry<float> _lightReach = null!;
@@ -280,20 +280,16 @@ public partial class Plugin : BaseUnityPlugin
         _spiralEyesNet = Config.Bind("Emote", "SpiralEyesForEveryone", true,
             "Показывать спиральные глаза и игрокам БЕЗ мода, родным методом игры. Рот так передать нельзя — у него сетевого пути нет, он остаётся только у владельцев мода.");
         _rootVictim = Config.Bind("Emote", "RootVictim", true,
-            "Обездвиживать ослеплённого штатными механизмами игры. Работает у игрока БЕЗ мода, " +
-            "урона не наносит. На земле идёт RPCA_Fall: тело перестаёт слушаться, у жертвы " +
-            "полноэкранный пост-эффект игры и тряска камеры. На стене и в воздухе — RPCA_Stick: " +
-            "держит на месте жёстко, не роняя, плюс тряска. Ронять висящего нельзя: в игре про " +
-            "подъём на гору это означает сорваться.");
+            "Обездвиживать ослеплённого штатным механизмом игры (RPCA_Stick): крепление к миру, " +
+            "тело остаётся жёстким, поза и мимика видны. Работает у игрока БЕЗ мода, урона не " +
+            "наносит, на стене не срывает. Игра снимает крепление сама через 4 секунды. " +
+            "Падение (RPCA_Fall) здесь намеренно не используется: оно обнуляет контроль над " +
+            "телом, и тогда вся поза пропадает — остаётся мгновенно обмякший человек.");
         _rootRepeat = Config.Bind("Emote", "RootRepeatSeconds", 0.5f,
-            "Как часто обновлять обездвиживание, пока луч держится на глазах. 0 — один раз. " +
-            "Счётчик падения в игре стекает примерно по секунде в секунду на земле, поэтому " +
-            "без обновления жертва встаёт раньше, чем мы уберём луч.");
-        _rootFallSecs = Config.Bind("Emote", "RootFallSeconds", 1.2f,
-            "На сколько секунд отнимать управление телом за один раз. Держится ровно столько " +
-            "после того, как луч ушёл, — то есть это и есть время на подъём. Больше 2 секунд " +
-            "ставить не стоит: в воздухе счётчик стекает в пять раз медленнее " +
-            "(Character.FixedUpdate: fallSeconds -= dt при isGrounded, иначе dt * 0.2).");
+            "Как часто обновлять крепление, пока луч держится на глазах. 0 — один раз. " +
+            "Обновление нужно из-за самой игры: jumpAction подписан на JumpStickEffect, и " +
+            "каждый прыжок приближает освобождение на 0.5–1.5 с при пороге 4 с. Новое " +
+            "крепление счётчик обнуляет, поэтому при 0.5 с напрыгать побег не выходит.");
         _rootFallShake = Config.Bind("Emote", "RootFallShake", 1f,
             "Сила тряски камеры у жертвы. 0 — без тряски. Шлётся лично ей: тряска в игре " +
             "идёт через синглтон GamefeelHandler, и общим вызовом затрясло бы всё лобби.");
@@ -3018,10 +3014,9 @@ public partial class Plugin : BaseUnityPlugin
     /// при пороге в 4 секунды. Два-три прыжка — и свободен навсегда, потому что
     /// заново его никто не прибивал.
     ///
-    /// Снимать прежнее удержание перед новым больше не нужно: RPCA_Fall не копит
-    /// ничего, а только поднимает счётчик (if (seconds > data.fallSeconds)). Это
-    /// одна из причин, по которым падение чище прибития — у того каждый повторный
-    /// вызов навешивал на бедро второй ConfigurableJoint.
+    /// Своё прежнее крепление снимается перед новым (RPCA_ClearJoint в StickVictim):
+    /// иначе каждый повтор навешивал бы на бедро ещё один ConfigurableJoint, и за
+    /// эпизод их накопилось бы восемь.
     ///
     /// Побег этим не отменяется: потолок в 4 секунды обрывает ослепление сам, и
     /// после него по этой цели ничего не проходит ещё 4 секунды. Отключается
@@ -3049,32 +3044,25 @@ public partial class Plugin : BaseUnityPlugin
         var view = victim.photonView;
         if (view == null || view.ViewID == 0) return;
 
-        // Механизм выбирается по тому, где человек находится, и обездвижен он будет
-        // в любом случае. Ронять того, кто висит на стене или в воздухе, нельзя:
-        // RPCA_Fall обнуляет контроль над телом, и в игре про подъём на гору это
-        // означает сорваться. Но и отпускать его просто так незачем.
+        // Держим прибитием, а не падением, и это решение, а не случайность.
         //
-        // Для таких — RPCA_Stick: ConfigurableJoint с запертым перемещением и
-        // свободным вращением, без connectedBody, то есть крепление к миру. Человек
-        // остаётся жёстким и висит там, где был; состояние климба игра при этом не
-        // трогает вовсе. Падения нет, и даже наоборот — пока крепление держит,
-        // HandleStickUpdate каждый кадр зовёт ClampSinceGrounded(0.5f), так что
-        // счётчик полёта не растёт и урон от падения не копится.
-        var d = victim.data;
-        bool offGround = d != null && (d.isClimbingAnything || !d.isGrounded);
-
+        // RPCA_Fall обнуляет контроль над телом (GetTargetRagdollControll() возвращает
+        // 0, как у потерявшего сознание). А персонаж в PEAK — физическая кукла:
+        // аниматор лишь задаёт ей цели, которые отрабатывают мышцы. При нулевом
+        // контроле цели ни на что не влияют, и всё зрелище мода — руки к лицу,
+        // «нет-нет», удержание позы — пропадает: жертва просто мгновенно обмякает.
+        // Выбор здесь жёсткий, одно взамен другого: либо полноэкранный пост-эффект
+        // игры и обмякшее тело, либо поза и мимика. Поза важнее, в ней весь мод.
+        // Пост-эффект остаётся на финал — в DropVictim, где падение и задумано.
+        //
+        // RPCA_Stick — это ConfigurableJoint с запертым перемещением и свободным
+        // вращением, без connectedBody, то есть крепление к миру. Тело остаётся
+        // жёстким, поза видна, и человека на стене это не срывает: состояние климба
+        // игра не трогает, а ClampSinceGrounded(0.5f) в HandleStickUpdate держит
+        // счётчик полёта на месте, так что урон от падения не копится. Поэтому
+        // механизм один и тот же, где бы жертва ни находилась.
         try
         {
-            // Канал обездвиживания. RPCA_Fall у игры вообще без проверки владельца,
-            // и внутри делает сразу три вещи на клиенте жертвы:
-            //   data.fallSeconds = seconds -> GetTargetRagdollControll() возвращает 0,
-            //                                 то есть тело обмякает (как у passedOut);
-            //   fallSeconds > 0            -> FallPost поднимает вес Volume, и у жертвы
-            //                                 идёт полноэкранный пост-эффект самой игры;
-            //   AddPerlinShake(shake)      -> тряска камеры.
-            // Прыжком это не обойти, в отличие от RPCA_Stick: при нулевом контроле
-            // прыгать нечем, а JumpStickEffect к падению не подписан.
-            float secs = Mathf.Max(0.1f, _rootFallSecs.Value);
             float shake = Mathf.Max(0f, _rootFallShake.Value);
 
             // Состояние игры — отдельный канал, по умолчанию выключен. Единственный
@@ -3086,45 +3074,25 @@ public partial class Plugin : BaseUnityPlugin
             float amount = (withStatus && _blindStatusAmount.Value > 0f)
                            ? _blindStatusAmount.Value : 0f;
 
-            if (offGround)
-            {
-                StickVictim(victim, amount);
+            StickVictim(victim, amount);
 
-                // Тряска без падения. seconds = 0 счётчик не поднимает — внутри стоит
-                // if (seconds > data.fallSeconds), — а AddPerlinShake зовётся всё равно.
-                // Получается чистая тряска камеры, без обмякшего тела и без пост-эффекта.
-                if (shake > 0f && view.Owner != null)
-                    view.RPC("RPCA_Fall", view.Owner, 0f, shake);
-
-                if (!quiet)
-                    Log.LogInfo($"Прибил '{victim.name}' на месте (RPCA_Stick): " +
-                                (d != null && d.isClimbingAnything ? "висит на стене" : "в воздухе") +
-                                " — ронять нельзя. Игра отпустит сама через 4 с.");
-                return;
-            }
-
-            // Канал обездвиживания на земле. RPCA_Fall у игры вообще без проверки
-            // владельца, и на клиенте жертвы делает три вещи сразу:
-            //   data.fallSeconds = seconds -> GetTargetRagdollControll() возвращает 0,
-            //                                 тело обмякает (как у потерявшего сознание);
-            //   fallSeconds > 0            -> FallPost поднимает вес Volume, и у жертвы
-            //                                 идёт полноэкранный пост-эффект самой игры;
-            //   AddPerlinShake(shake)      -> тряска камеры.
-            // Прыжком это не обойти, в отличие от прибития: при нулевом контроле
-            // прыгать нечем, а JumpStickEffect к падению не подписан.
-            view.RPC("RPCA_Fall", RpcTarget.All, secs, 0f);
-
-            // Тряска — отдельным адресным вызовом. GamefeelHandler.instance синглтон,
-            // так что общий вызов с shake > 0 затряс бы камеры всем в лобби, включая
-            // тех, кто вообще ни при чём. Второй вызов счётчик не понижает: внутри
-            // стоит if (seconds > data.fallSeconds).
+            // Тряска камеры без падения: seconds = 0 счётчик не поднимает, внутри
+            // стоит if (seconds > data.fallSeconds), а AddPerlinShake зовётся всё
+            // равно. Поэтому тряска достаётся жертве, а тело остаётся жёстким.
+            // Адресно владельцу: GamefeelHandler.instance — синглтон, и общий вызов
+            // затряс бы камеры всем в лобби, включая тех, кто вообще ни при чём.
             if (shake > 0f && view.Owner != null)
-                view.RPC("RPCA_Fall", view.Owner, secs, shake);
+                view.RPC("RPCA_Fall", view.Owner, 0f, shake);
 
             if (!quiet)
-                Log.LogInfo($"Обездвижил '{victim.name}' на {secs:0.0} с (RPCA_Fall, урона нет).");
-
-            if (amount > 0f) StickVictim(victim, amount);
+            {
+                var d = victim.data;
+                string where = d == null ? ""
+                               : d.isClimbingAnything ? ", висит на стене"
+                               : !d.isGrounded ? ", в воздухе" : "";
+                Log.LogInfo($"Прибил '{victim.name}' на месте (RPCA_Stick{where}, урона нет). " +
+                            "Игра отпустит сама через 4 с.");
+            }
         }
         catch (System.Exception e) { Log.LogWarning($"Обездвиживание не прошло: {e.GetType().Name}: {e.Message}"); }
     }
