@@ -155,6 +155,10 @@ public partial class Plugin : BaseUnityPlugin
     // Когда жертву прибивали в последний раз. Нужно, чтобы прибивать заново,
     // пока держится луч: игра даёт сбросить удержание прыжком.
     private readonly Dictionary<int, float> _rootAt = new();
+    // Точка, к которой жертва прибита на весь эпизод. Без неё каждое обновление
+    // крепления брало текущее место бедра, и жертва уходила вбок «храповиком»:
+    // полсекунды давления -> новое крепление уже на новом месте -> ещё полсекунды.
+    private readonly Dictionary<int, Vector3> _rootAnchor = new();
     private ConfigEntry<float> _poseLoopSpeed = null!, _poseLoopSpan = null!;
     private ConfigEntry<string> _mirrorItemName = null!, _sfxFilter = null!;
     private ConfigEntry<float> _eyesRadius = null!;
@@ -2515,7 +2519,12 @@ public partial class Plugin : BaseUnityPlugin
             foreach (var p in props)
             {
                 if (!m.HasProperty(p)) continue;
-                backup?.Add((m, p, m.GetTexture(p)));
+
+                // В бэкап кладём только то, что ещё НЕ подменено. Иначе повторный
+                // BeginBlind записывал бы спираль как «оригинал», и возврат ставил
+                // бы спираль обратно — глаза оставались закрученными навсегда.
+                var cur = m.GetTexture(p);
+                if (cur != tex) backup?.Add((m, p, cur));
                 m.SetTexture(p, tex);
             }
         }
@@ -2539,7 +2548,8 @@ public partial class Plugin : BaseUnityPlugin
         foreach (var prop in props)
         {
             if (!m.HasProperty(prop)) continue;
-            backup?.Add((m, prop, m.GetTexture(prop)));
+            var cur = m.GetTexture(prop);
+            if (cur != tex) backup?.Add((m, prop, cur));   // см. ApplyEyeTexture
             m.SetTexture(prop, tex);
         }
     }
@@ -2903,6 +2913,12 @@ public partial class Plugin : BaseUnityPlugin
     }
 
     /// <summary>Ключ цели для кулдауна: ViewID, если персонаж сетевой, иначе id объекта.</summary>
+    /// <summary>
+    /// Насколько далеко от якоря жертву ещё тянуть обратно, в метрах. Дальше —
+    /// считаем, что её унесло не нашим креплением, и переносим якорь к ней.
+    /// </summary>
+    private const float RootAnchorMax = 2.5f;
+
     private static int VictimKey(Character c)
     {
         var v = c.photonView;
@@ -3123,7 +3139,32 @@ public partial class Plugin : BaseUnityPlugin
             statusAmount = 0f;
         }
 
-        Vector3 pos = rig.position;   // туда же, где бедро и так есть: без рывка
+        // Якорь берём ОДИН раз на эпизод, а не по текущему месту бедра.
+        //
+        // Проверка в игре (2 ноября): «если давит вбок — можно уйти от зайчика».
+        // Причина не в сети и не в прыжке. Крепление обновлялось каждые полсекунды
+        // по текущему положению, то есть работало храповиком: человек, упираясь в
+        // сторону, за полсекунды сдвигался на шаг, а следующее крепление принимало
+        // этот шаг за новую норму. Так и выходил из луча, медленно, но беспрепятственно.
+        //
+        // Теперь все обновления эпизода тянут к одной и той же точке. Якорь живёт в
+        // _rootAnchor, снимается в UnrootVictim вместе с креплением.
+        int akey = VictimKey(victim);
+        if (!_rootAnchor.TryGetValue(akey, out Vector3 pos))
+        {
+            pos = rig.position;
+            _rootAnchor[akey] = pos;
+        }
+        else if ((rig.position - pos).sqrMagnitude > RootAnchorMax * RootAnchorMax)
+        {
+            // Если жертву всё же унесло далеко — упала, провалилась, её столкнули, —
+            // тянуть её обратно через полкарты нельзя: получится рывок трупа на
+            // верёвке. В этом случае якорь переносим на текущее место.
+            pos = rig.position;
+            _rootAnchor[akey] = pos;
+            Log.LogInfo($"Якорь крепления '{victim.name}' перенесён: жертву унесло дальше {RootAnchorMax:0.0} м.");
+        }
+
         try
         {
             view.RPC("RPCA_ClearJoint", RpcTarget.All, BodypartType.Hip);
@@ -3149,6 +3190,7 @@ public partial class Plugin : BaseUnityPlugin
     private void UnrootVictim(Character? victim)
     {
         if (!_rootVictim.Value || victim == null) return;
+        _rootAnchor.Remove(VictimKey(victim));   // следующий эпизод начнёт якорь заново
         var view = victim.photonView;
         if (view == null || view.ViewID == 0) return;
         try { view.RPC("RPCA_UnFall", RpcTarget.All); }
@@ -3234,9 +3276,32 @@ public partial class Plugin : BaseUnityPlugin
     private BlindState BeginBlind(Character victim)
     {
         var st = new BlindState { beganAt = Time.time };
+        var cc = victim.GetComponentInChildren<CharacterCustomization>();
+
+        // Повторный BeginBlind поверх живого эффекта — не теория, так и было в игре
+        // 2 ноября: в логе два «Blind begin» подряд без снятия между ними. Прежнее
+        // состояние при этом просто выпадало из словаря, а вместе с ним терялись
+        // настоящие текстуры лица и исходное значение forcePresetEyes. Дальше беда
+        // накладывалась сама на себя:
+        //   - новый бэкап снимался с УЖЕ подменённого лица, то есть «оригиналом»
+        //     становилась спираль;
+        //   - forcePrev записывался как true, потому что первый вызов флаг уже поднял.
+        // А оба метода игры, которые возвращают глаза, стоят за этим флагом:
+        // CharacterPassedOut и OnRevive_RPC начинаются с if (!forcePresetEyes).
+        // Поднятый навсегда флаг запирал игре возврат, а наш возврат ставил спираль.
+        // Отсюда и «глаза постоянной спиралькой, даже если в них не светишь».
+        //
+        // Поэтому старое состояние сначала честно снимаем, и только потом ставим новое.
+        if (_blinds.TryGetValue(victim, out var old))
+        {
+            RestoreFaceTextures(old.faceBackup);
+            if (cc != null) cc.forcePresetEyes = old.forcePrev;
+            Log.LogInfo($"BeginBlind поверх живого эффекта на '{victim.name}': " +
+                        "прежнее лицо возвращено перед новым бэкапом.");
+        }
+
         _blinds[victim] = st;
 
-        var cc = victim.GetComponentInChildren<CharacterCustomization>();
         if (cc != null && cc.passedOutEyes != null)
         {
             st.forcePrev = cc.forcePresetEyes;
